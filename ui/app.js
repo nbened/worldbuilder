@@ -960,24 +960,42 @@ function pictureStage(known, image) {
 }
 
 function effectLayer(path, speed = 100) {
-  const video = h("video", {
-    class: "picture-fx-source",
-    src: `/${path}`,
-    autoplay: true,
-    loop: true,
-    muted: true,
-    playsinline: true,
-    preload: "auto",
-    "data-effect": path,
-  });
-  const canvas = h("canvas", { class: "picture-fx" });
-  muteVideo(video);
-  video.playbackRate = Math.min(4, Math.max(0.1, speed / 100));
+  const rate = Math.min(4, Math.max(0.1, speed / 100));
+  const makeVideo = () => {
+    const video = h("video", {
+      class: "picture-fx-source",
+      src: `/${path}`,
+      muted: true,
+      playsinline: true,
+      preload: "auto",
+      "data-effect": path,
+    });
+    muteVideo(video);
+    video.loop = false;
+    video.playbackRate = rate;
+    return video;
+  };
+  const front = makeVideo();
+  const back = makeVideo();
+  const frontCanvas = h("canvas", { class: "picture-fx is-front" });
+  const backCanvas = h("canvas", { class: "picture-fx is-back" });
+  frontCanvas.style.opacity = "1";
+  backCanvas.style.opacity = "0";
   queueMicrotask(() => {
-    video.playbackRate = Math.min(4, Math.max(0.1, speed / 100));
-    bindChromaCanvas(video, canvas, path);
+    front.playbackRate = rate;
+    back.playbackRate = rate;
+    bindChromaCanvas(front, frontCanvas, path);
+    bindChromaCanvas(back, backCanvas, path);
+    bindSeamlessCrossfade(front, back, frontCanvas, backCanvas);
   });
-  return h("div", { class: "picture-fx-wrap", "aria-hidden": "true" }, video, canvas);
+  return h(
+    "div",
+    { class: "picture-fx-wrap", "aria-hidden": "true" },
+    front,
+    back,
+    frontCanvas,
+    backCanvas
+  );
 }
 
 function bindChromaCanvas(video, canvas, path) {
@@ -1536,7 +1554,7 @@ function animLayer(entry, index) {
   });
   muteVideo(primary);
   muteVideo(secondary);
-  queueMicrotask(() => bindAnimCrossfade(primary, secondary));
+  queueMicrotask(() => bindSeamlessCrossfade(primary, secondary));
 
   return h(
     "div",
@@ -1576,19 +1594,21 @@ function animLayer(entry, index) {
   );
 }
 
-function bindAnimCrossfade(front, back) {
+function bindSeamlessCrossfade(front, back, frontDisplay = front, backDisplay = back) {
   if (!front || !back || front.dataset.crossfade === "1") return;
   front.dataset.crossfade = "1";
   muteVideo(front);
   muteVideo(back);
   front.loop = false;
   back.loop = false;
-  front.style.opacity = "1";
-  back.style.opacity = "0";
+  frontDisplay.style.opacity = "1";
+  backDisplay.style.opacity = "0";
 
   let fading = false;
   let lead = front;
   let trail = back;
+  let leadDisplay = frontDisplay;
+  let trailDisplay = backDisplay;
   let raf = 0;
 
   const playMuted = async (video) => {
@@ -1621,8 +1641,8 @@ function bindAnimCrossfade(front, back) {
     const tick = (now) => {
       if (!front.isConnected) return;
       const t = Math.min(1, (now - started) / fadeMs);
-      lead.style.opacity = String(1 - t);
-      trail.style.opacity = String(t);
+      leadDisplay.style.opacity = String(1 - t);
+      trailDisplay.style.opacity = String(t);
       if (t < 1) {
         requestAnimationFrame(tick);
         return;
@@ -1633,18 +1653,24 @@ function bindAnimCrossfade(front, back) {
       } catch {
         /* ignore */
       }
-      lead.style.opacity = "0";
-      trail.style.opacity = "1";
+      leadDisplay.style.opacity = "0";
+      trailDisplay.style.opacity = "1";
       const swap = lead;
       lead = trail;
       trail = swap;
+      const swapDisplay = leadDisplay;
+      leadDisplay = trailDisplay;
+      trailDisplay = swapDisplay;
       fading = false;
     };
     requestAnimationFrame(tick);
   };
 
   const watch = () => {
-    if (!front.isConnected) return;
+    if (!front.isConnected) {
+      cancelAnimationFrame(raf);
+      return;
+    }
     if (!fading) {
       const duration = lead.duration;
       const fade = Number.isFinite(duration) ? Math.min(ANIM_FADE, duration * 0.45) : ANIM_FADE;
@@ -1663,11 +1689,6 @@ function bindAnimCrossfade(front, back) {
   });
   playMuted(front);
   raf = requestAnimationFrame(watch);
-  front.addEventListener(
-    "remove",
-    () => cancelAnimationFrame(raf),
-    { once: true }
-  );
 }
 
 function beginAnimMove(event, index) {

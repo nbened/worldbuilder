@@ -290,11 +290,12 @@ def effect_key_filter(path: Path) -> str:
     return "chromakey=0x00FF00:0.15:0.1"
 
 
-def seamless_anim_loop(path: Path, fps: int, fade: float = ANIM_LOOP_FADE) -> Path:
+def seamless_loop_clip(path: Path, fps: int, fade: float = ANIM_LOOP_FADE) -> Path:
     """Cache a muted clip whose end cross-fades into its start, safe to stream-loop.
 
     The last `fade` seconds dissolve into the first `fade` seconds; the cached
     file is then `duration - fade` long so hard cuts disappear when it loops.
+    Used for both animations and full-frame effects.
     """
     duration = probe_duration(path)
     fade = min(fade, max(0.25, duration * 0.45))
@@ -339,6 +340,10 @@ def seamless_anim_loop(path: Path, fps: int, fade: float = ANIM_LOOP_FADE) -> Pa
     return target
 
 
+# Back-compat alias
+seamless_anim_loop = seamless_loop_clip
+
+
 def build_command(
     scenes: list[Scene],
     total: float,
@@ -374,23 +379,24 @@ def build_command(
                 "-i", str(segment.image),
             ]
 
-        # Looped green-screen effects, then positioned animation overlays.
+        # Looped green-screen effects (seamless end→start fade), then animations.
         effect_inputs: list[tuple[int, dict, float]] = []
         for position, segment in enumerate(segments):
             duration = segment.hold + fade_out[position]
             for effect in segment.effects:
-                effect_inputs.append((position, effect, duration))
+                looped = seamless_loop_clip(effect["path"], fps)
+                effect_inputs.append((position, {**effect, "looped": looped}, duration))
                 # No -t here: setpts+trim below consume however much source the speed needs.
                 cmd += [
                     "-stream_loop", "-1",
-                    "-i", str(effect["path"]),
+                    "-i", str(looped),
                 ]
 
         anim_inputs: list[tuple[int, dict, float]] = []
         for position, segment in enumerate(segments):
             duration = segment.hold + fade_out[position]
             for anim in segment.animations:
-                looped = seamless_anim_loop(anim["path"], fps)
+                looped = seamless_loop_clip(anim["path"], fps)
                 anim_inputs.append((position, anim, duration))
                 cmd += [
                     "-stream_loop", "-1",

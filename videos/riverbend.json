@@ -24,12 +24,7 @@
         "assets/music/Pumpkin Sax Parade.wav",
         "assets/music/Pumpkin Static.wav"
       ],
-      "effects": [
-        {
-          "file": "assets/effects/autumn-leaves.mp4",
-          "speed": 40
-        }
-      ],
+      "effects": [],
       "animations": [
         {
           "file": "assets/animations/Single_locked_off_static_shot__gwr_video_mvp.mp4",
