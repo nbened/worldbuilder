@@ -1,0 +1,56 @@
+{
+  "project": "Riverbend Coffee",
+  "output": {
+    "file": "out/riverbend-coffee.mp4",
+    "width": 1620,
+    "height": 1080,
+    "fps": 30
+  },
+  "defaults": {
+    "fade_seconds": 3,
+    "track_crossfade": 2,
+    "open_close_fade": 2
+  },
+  "scenes": [
+    {
+      "title": "Riverbend Station",
+      "image": "assets/images/train.png",
+      "map": {
+        "seconds": 0
+      },
+      "pan": "none",
+      "zoom": 1,
+      "tracks": [
+        "assets/music/Pumpkin Sax Parade.wav",
+        "assets/music/Pumpkin Static.wav"
+      ],
+      "effects": [
+        {
+          "file": "assets/effects/autumn-leaves.mp4",
+          "speed": 40
+        }
+      ],
+      "animations": [
+        {
+          "file": "assets/animations/Single_locked_off_static_shot__gwr_video_mvp.mp4",
+          "x": 0.6477063588627051,
+          "y": 0.004294713741282921,
+          "w": 0.3468573098104508
+        }
+      ]
+    },
+    {
+      "title": "Riverbend Coffee",
+      "image": "assets/images/harvest-festival.png",
+      "map": {
+        "seconds": 0
+      },
+      "pan": "none",
+      "zoom": 1,
+      "tracks": [
+        "assets/music/Sunlit Breakfast.wav",
+        "assets/music/Pumpkin Static.wav"
+      ]
+    }
+  ]
+}

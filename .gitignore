@@ -1,0 +1,16 @@
+# Local media — keep the folders, don't ship the files
+assets/images/**
+assets/maps/**
+assets/music/**
+assets/effects/**
+assets/animations/**
+!assets/**/.gitkeep
+
+# Build / editor caches
+out/
+.cache/
+.scratch/
+*.json.bak
+.DS_Store
+__pycache__/
+*.pyc
