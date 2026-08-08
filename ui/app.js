@@ -2923,6 +2923,10 @@ async function uploadAsset(kind, file) {
     if (kind === "images" && data.path && !scene().image) scene().image = data.path;
     await refreshOutputs();
     state.note = "";
+    if (kind === "music" && data.path && state.page === "scene") {
+      toggleSceneSong(data.path, true);
+      return;
+    }
     render();
   } catch (error) {
     state.note = error.message || "Upload failed";

@@ -4,6 +4,7 @@ assets/maps/**
 assets/music/**
 assets/effects/**
 assets/animations/**
+assets/sounds/**
 !assets/**/.gitkeep
 
 # Build / editor caches
