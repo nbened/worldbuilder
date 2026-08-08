@@ -25,6 +25,8 @@ from pathlib import Path
 
 ANIM_LOOP_FADE = 3.0
 ANIM_LOOP_CACHE = Path(__file__).resolve().parent / ".cache" / "anim-loops"
+OVERLAY_CACHE = Path(__file__).resolve().parent / ".cache" / "overlays"
+OVERLAY_FADE = 0.6
 
 EASE = "({p})*({p})*(3-2*({p}))"  # smoothstep, so pans start and end gently
 
@@ -64,6 +66,7 @@ class Scene:
     location: str
     segments: list[Segment] = field(default_factory=list)
     tracks: list[tuple[Path, float, str]] = field(default_factory=list)
+    sounds: list[tuple[Path, float]] = field(default_factory=list)  # (path, volume 0–1)
     effects: list[dict] = field(default_factory=list)
     animations: list[dict] = field(default_factory=list)
     audio_duration: float = 0.0
@@ -152,6 +155,18 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
         audio_duration = sum(d for _, d, _ in tracks)
         audio_duration -= track_crossfade * (len(tracks) - 1)
 
+        sounds: list[tuple[Path, float]] = []
+        for entry in raw.get("sounds", []) or []:
+            source = entry["file"] if isinstance(entry, dict) else entry
+            path = resolve(root, source, "sound")
+            raw_volume = 55 if not isinstance(entry, dict) else entry.get("volume", 55)
+            try:
+                # Slider is presence under music — boost so beds read through songs.
+                volume = max(0.0, min(float(raw_volume) / 100.0 * 2.2, 2.5))
+            except (TypeError, ValueError):
+                volume = 1.2
+            sounds.append((path, volume))
+
         map_config = raw.get("map", {})
         if isinstance(map_config, str):
             map_config = {"image": map_config}
@@ -182,12 +197,37 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             source = entry.get("file")
             if not source:
                 continue
+            brightness = float(entry.get("brightness", 100))
+            brightness = max(20.0, min(brightness, 200.0))
+            saturation = float(entry.get("saturation", 100))
+            saturation = max(0.0, min(saturation, 200.0))
+            speed = float(entry.get("speed", 100))
+            speed = max(25.0, min(speed, 200.0))
+            aspect = entry.get("aspect", "native")
+            if aspect not in ("native", "landscape", "portrait"):
+                aspect = "native"
+            loop_in = entry.get("loop_in")
+            loop_out = entry.get("loop_out")
+            # 0 means unset (use the full clip), not a hard zero out-point.
+            in_at = None if loop_in is None else float(loop_in)
+            out_at = None if loop_out is None else float(loop_out)
+            if in_at is not None and in_at <= 0:
+                in_at = None
+            if out_at is not None and out_at <= 0:
+                out_at = None
             animations.append(
                 {
                     "path": resolve(root, source, "animation"),
                     "x": float(entry.get("x", 0.36)),
                     "y": float(entry.get("y", 0.28)),
                     "w": float(entry.get("w", 0.28)),
+                    "brightness": brightness,
+                    "saturation": saturation,
+                    "speed": speed,
+                    "aspect": aspect,
+                    "soft_edges": bool(entry.get("soft_edges", False)),
+                    "loop_in": in_at,
+                    "loop_out": out_at,
                 }
             )
 
@@ -236,6 +276,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             location=raw.get("location", ""),
             segments=segments,
             tracks=tracks,
+            sounds=sounds,
             effects=effects,
             animations=animations,
             audio_duration=audio_duration,
@@ -290,34 +331,71 @@ def effect_key_filter(path: Path) -> str:
     return "chromakey=0x00FF00:0.15:0.1"
 
 
-def seamless_loop_clip(path: Path, fps: int, fade: float = ANIM_LOOP_FADE) -> Path:
+def seamless_loop_clip(
+    path: Path,
+    fps: int,
+    fade: float = ANIM_LOOP_FADE,
+    start: float | None = None,
+    end: float | None = None,
+) -> Path:
     """Cache a muted clip whose end cross-fades into its start, safe to stream-loop.
 
-    The last `fade` seconds dissolve into the first `fade` seconds; the cached
-    file is then `duration - fade` long so hard cuts disappear when it loops.
+    Optional start/end trim the source before looping. The last `fade` seconds
+    dissolve into the first `fade` seconds; the cached file is then
+    `clip_len - fade` long so hard cuts disappear when it loops.
     Used for both animations and full-frame effects.
     """
     duration = probe_duration(path)
-    fade = min(fade, max(0.25, duration * 0.45))
-    if duration <= fade + 0.05:
-        return path
+    t0 = 0.0 if start is None else max(0.0, min(float(start), duration))
+    t1 = duration if end is None else max(t0 + 0.25, min(float(end), duration))
+    clip_len = t1 - t0
+    fade = min(fade, max(0.25, clip_len * 0.45))
+    if clip_len <= fade + 0.05:
+        if t0 <= 0.001 and t1 >= duration - 0.001:
+            return path
+        # Too short to crossfade — just emit the trimmed slice.
+        stat = path.stat()
+        token = hashlib.sha1(
+            f"{path}|{stat.st_mtime_ns}|{stat.st_size}|trim|{t0:.3f}|{t1:.3f}|{fps}".encode()
+        ).hexdigest()[:16]
+        target = ANIM_LOOP_CACHE / f"{token}.mp4"
+        if target.exists():
+            return target
+        ANIM_LOOP_CACHE.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                "ffmpeg", "-y", "-hide_banner", "-v", "error",
+                "-ss", f"{t0:.3f}", "-to", f"{t1:.3f}",
+                "-i", str(path),
+                "-an",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                str(target),
+            ]
+        )
+        return target
 
     stat = path.stat()
     token = hashlib.sha1(
-        f"{path}|{stat.st_mtime_ns}|{stat.st_size}|{fade:.3f}|{fps}".encode()
+        f"{path}|{stat.st_mtime_ns}|{stat.st_size}|{fade:.3f}|{fps}|{t0:.3f}|{t1:.3f}".encode()
     ).hexdigest()[:16]
     target = ANIM_LOOP_CACHE / f"{token}.mp4"
     if target.exists():
         return target
 
     ANIM_LOOP_CACHE.mkdir(parents=True, exist_ok=True)
-    # Crossfade the clip into itself, then keep the middle slice whose end
-    # already matches its start (so stream-looping is seamless).
-    offset = max(duration - fade, 0.0)
+    # Trim to the loop window, crossfade into itself, then keep the middle
+    # slice whose end already matches its start (so stream-looping is seamless).
+    offset = max(clip_len - fade, 0.0)
     loop_len = offset
     graph = (
-        f"[0:v]fps={fps},format=yuv420p,setpts=PTS-STARTPTS[a];"
-        f"[1:v]fps={fps},format=yuv420p,setpts=PTS-STARTPTS[b];"
+        f"[0:v]trim=start={t0:.3f}:end={t1:.3f},setpts=PTS-STARTPTS,"
+        f"fps={fps},format=yuv420p[a];"
+        f"[1:v]trim=start={t0:.3f}:end={t1:.3f},setpts=PTS-STARTPTS,"
+        f"fps={fps},format=yuv420p[b];"
         f"[a][b]xfade=transition=fade:duration={fade:.3f}:offset={offset:.3f}[xf];"
         f"[xf]trim=start={fade:.3f}:duration={loop_len:.3f},setpts=PTS-STARTPTS[v]"
     )
@@ -344,6 +422,136 @@ def seamless_loop_clip(path: Path, fps: int, fade: float = ANIM_LOOP_FADE) -> Pa
 seamless_anim_loop = seamless_loop_clip
 
 
+def _pil():
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as exc:
+        raise BuildError(
+            "Pillow is required for lower-third overlays. "
+            "Run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+        ) from exc
+    return Image, ImageDraw, ImageFont
+
+
+def pick_font(size: int):
+    _, _, ImageFont = _pil()
+    candidates = [
+        Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Helvetica.ttc"),
+        Path("/Library/Fonts/Arial.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ]
+    for path in candidates:
+        if path.exists():
+            try:
+                return ImageFont.truetype(str(path), size=size)
+            except OSError:
+                continue
+    return ImageFont.load_default()
+
+
+def render_overlay_png(path: Path, lines: list[tuple[str, int, float]], *, height: int) -> Path:
+    """Render a transparent PNG lower-third. lines: (text, font_px, opacity)."""
+    Image, ImageDraw, _ = _pil()
+    scale = max(1.0, height / 1080)
+    pad_x = int(round(18 * scale))
+    pad_y = int(round(12 * scale))
+    gap = int(round(4 * scale))
+
+    fonts = [pick_font(max(12, int(round(size * scale)))) for _, size, _ in lines]
+    # Measure
+    probe = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(probe)
+    widths = []
+    heights = []
+    for (text, _, _), font in zip(lines, fonts):
+        box = draw.textbbox((0, 0), text, font=font)
+        widths.append(box[2] - box[0])
+        heights.append(box[3] - box[1])
+    width = max(widths, default=1) + pad_x * 2
+    total_h = pad_y * 2 + sum(heights) + gap * max(0, len(lines) - 1)
+    image = Image.new("RGBA", (width, total_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    y = pad_y
+    for (text, _, opacity), font, line_h in zip(lines, fonts, heights):
+        alpha = max(0, min(255, int(round(255 * opacity))))
+        # Soft shadow, then white text — readable on both light and dark dioramas.
+        shadow = (0, 0, 0, int(round(alpha * 0.55)))
+        fill = (255, 255, 255, alpha)
+        x = pad_x
+        for dx, dy in ((1, 1), (2, 2), (0, 1)):
+            draw.text((x + dx, y + dy), text, font=font, fill=shadow)
+        draw.text((x, y), text, font=font, fill=fill)
+        y += line_h + gap
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(path, "PNG")
+    return path
+
+
+def overlay_png_for(event: dict, height: int) -> Path:
+    if event["kind"] == "credit":
+        key = hashlib.sha1(f"credit|{event['text']}|{height}".encode()).hexdigest()[:16]
+        path = OVERLAY_CACHE / f"credit-{key}.png"
+        if not path.exists():
+            render_overlay_png(
+                path,
+                [(event["text"], 28, 0.92)],
+                height=height,
+            )
+        return path
+    key = hashlib.sha1(
+        f"song|{event['title']}|{event['streaming_from']}|{height}".encode()
+    ).hexdigest()[:16]
+    path = OVERLAY_CACHE / f"song-{key}.png"
+    if not path.exists():
+        render_overlay_png(
+            path,
+            [
+                (event["title"], 36, 1.0),
+                (f"Streaming from {event['streaming_from']}", 22, 0.82),
+            ],
+            height=height,
+        )
+    return path
+
+
+def collect_overlay_events(scenes: list[Scene], overlays: dict | None) -> list[dict]:
+    overlays = overlays or {}
+    events: list[dict] = []
+    credit = overlays.get("credit") or {}
+    if credit.get("enabled", True):
+        events.append(
+            {
+                "kind": "credit",
+                "text": str(credit.get("text") or "Built with hearthbound.com"),
+                "x": float(credit.get("x", 0.035)),
+                "y": float(credit.get("y", 0.9)),
+                "start": 0.0,
+                "duration": float(credit.get("show_seconds", 5)),
+            }
+        )
+    now = overlays.get("now_playing") or {}
+    if now.get("enabled", True):
+        streaming = str(now.get("streaming_from") or "hearthbound.com")
+        show = float(now.get("show_seconds", 5))
+        x = float(now.get("x", 0.58))
+        y = float(now.get("y", 0.86))
+        for scene in scenes:
+            for start, _duration, name in scene.track_starts():
+                events.append(
+                    {
+                        "kind": "now_playing",
+                        "title": name,
+                        "streaming_from": streaming,
+                        "x": x,
+                        "y": y,
+                        "start": start,
+                        "duration": show,
+                    }
+                )
+    return events
+
+
 def build_command(
     scenes: list[Scene],
     total: float,
@@ -357,6 +565,7 @@ def build_command(
     open_close_fade: float,
     quality: dict,
     audio_only: bool = False,
+    overlays: dict | None = None,
 ) -> list[str]:
     segments = [segment for scene in scenes for segment in scene.segments]
     graph: list[str] = []
@@ -396,18 +605,46 @@ def build_command(
         for position, segment in enumerate(segments):
             duration = segment.hold + fade_out[position]
             for anim in segment.animations:
-                looped = seamless_loop_clip(anim["path"], fps)
+                looped = seamless_loop_clip(
+                    anim["path"],
+                    fps,
+                    start=anim.get("loop_in"),
+                    end=anim.get("loop_out"),
+                )
                 anim_inputs.append((position, anim, duration))
+                # No -t: setpts+trim below consume however much source the speed needs.
                 cmd += [
                     "-stream_loop", "-1",
-                    "-t", f"{duration:.3f}",
                     "-i", str(looped),
                 ]
         audio_offset = len(segments) + len(effect_inputs) + len(anim_inputs)
 
+    overlay_inputs: list[tuple[dict, Path]] = []
+    overlay_base = audio_offset
+    if not audio_only:
+        for event in collect_overlay_events(scenes, overlays):
+            png = overlay_png_for(event, height)
+            overlay_inputs.append((event, png))
+            hold = max(float(event["duration"]), OVERLAY_FADE * 2 + 0.05)
+            cmd += [
+                "-loop", "1",
+                "-framerate", str(fps),
+                "-t", f"{hold:.3f}",
+                "-i", str(png),
+            ]
+        overlay_base = audio_offset
+        audio_offset = overlay_base + len(overlay_inputs)
+
     for scene in scenes:
         for path, _, _ in scene.tracks:
             cmd += ["-i", str(path)]
+        for path, _volume in scene.sounds:
+            # Loop ambient beds to cover the whole scene.
+            cmd += [
+                "-stream_loop", "-1",
+                "-t", f"{max(scene.audio_duration, 0.1):.3f}",
+                "-i", str(path),
+            ]
 
     if not audio_only:
         effect_base = len(segments)
@@ -427,14 +664,55 @@ def build_command(
             # Animations sit under full-frame effects.
             for step, input_index in enumerate(anim_by_segment[position]):
                 anim = anim_inputs[input_index - anim_base][1]
+                hold = segment.hold + fade_out[position]
+                rate = max(0.1, min(float(anim.get("speed", 100)) / 100.0, 4.0))
                 aw = max(2, int(round(width * max(0.05, min(anim["w"], 1.0)) / 2) * 2))
                 ax = int(round(width * max(0.0, min(anim["x"], 1.0))))
                 ay = int(round(height * max(0.0, min(anim["y"], 1.0))))
                 an = f"an{position}x{step}"
                 out = f"a{position}x{step}"
+                # CSS brightness/saturate(%) → ffmpeg eq. Saturation 1.0 is neutral.
+                eq_bright = max(-1.0, min(1.0, (float(anim.get("brightness", 100)) - 100.0) / 100.0))
+                eq_sat = max(0.0, min(float(anim.get("saturation", 100)) / 100.0, 3.0))
+                eq_parts = []
+                if abs(eq_bright) > 0.001:
+                    eq_parts.append(f"brightness={eq_bright:.4f}")
+                if abs(eq_sat - 1.0) > 0.001:
+                    eq_parts.append(f"saturation={eq_sat:.4f}")
+                bright_filter = f",eq={':'.join(eq_parts)}" if eq_parts else ""
+                aspect = anim.get("aspect", "native")
+                if aspect == "landscape":
+                    ah = max(2, int(round(aw * 9 / 16 / 2) * 2))
+                    scale = (
+                        f"scale={aw}:{ah}:force_original_aspect_ratio=increase:flags=lanczos,"
+                        f"crop={aw}:{ah},setsar=1"
+                    )
+                elif aspect == "portrait":
+                    ah = max(2, int(round(aw * 16 / 9 / 2) * 2))
+                    scale = (
+                        f"scale={aw}:{ah}:force_original_aspect_ratio=increase:flags=lanczos,"
+                        f"crop={aw}:{ah},setsar=1"
+                    )
+                else:
+                    scale = f"scale={aw}:-2:flags=lanczos,setsar=1"
+                if anim.get("soft_edges"):
+                    # Feather ~12% of each edge into transparency for easier blends.
+                    edge = (
+                        "format=rgba,"
+                        "geq="
+                        "r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
+                        "a='min(min(255*min(X\\,W-1-X)/(0.12*W)\\,"
+                        "255*min(Y\\,H-1-Y)/(0.12*H))\\,255)'"
+                    )
+                    pix = edge
+                else:
+                    pix = "format=yuv420p"
                 graph.append(
                     f"[{input_index}:v]fps={fps},"
-                    f"scale={aw}:-2:flags=lanczos,setsar=1,format=yuv420p[{an}]"
+                    f"setpts=PTS/{rate:.4f},"
+                    f"trim=duration={hold:.3f},setpts=PTS-STARTPTS,"
+                    f"{scale}{bright_filter},"
+                    f"{pix}[{an}]"
                 )
                 graph.append(
                     f"[{current}][{an}]overlay="
@@ -482,8 +760,33 @@ def build_command(
         graph.append(
             f"{video_out}trim=duration={total:.3f},setpts=PTS-STARTPTS,"
             f"fade=t=in:st=0:d={open_close_fade:.3f},"
-            f"fade=t=out:st={max(total - open_close_fade, 0):.3f}:d={open_close_fade:.3f}[v]"
+            f"fade=t=out:st={max(total - open_close_fade, 0):.3f}:d={open_close_fade:.3f}[vbase]"
         )
+
+        current = "vbase"
+        for step, (event, _png) in enumerate(overlay_inputs):
+            input_index = overlay_base + step
+            start = max(0.0, float(event["start"]))
+            duration = float(event["duration"])
+            ov_fade = min(OVERLAY_FADE, max(0.05, duration * 0.45))
+            out_start = max(0.0, duration - ov_fade)
+            ax = int(round(width * max(0.0, min(event["x"], 1.0))))
+            ay = int(round(height * max(0.0, min(event["y"], 1.0))))
+            ov = f"ov{step}"
+            out = f"vo{step}"
+            graph.append(
+                f"[{input_index}:v]fps={fps},format=rgba,"
+                f"fade=t=in:st=0:d={ov_fade:.3f}:alpha=1,"
+                f"fade=t=out:st={out_start:.3f}:d={ov_fade:.3f}:alpha=1,"
+                f"setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
+            )
+            graph.append(
+                f"[{current}][{ov}]overlay="
+                f"x='min({ax}\\,main_w-overlay_w)':y='min({ay}\\,main_h-overlay_h)':"
+                f"eof_action=pass:format=auto[{out}]"
+            )
+            current = out
+        graph.append(f"[{current}]format=yuv420p,trim=duration={total:.3f},setpts=PTS-STARTPTS[v]")
 
     index = audio_offset
     scene_labels: list[str] = []
@@ -512,6 +815,26 @@ def build_command(
             joined = "".join(f"[{label}]" for label in track_labels)
             merged = f"s{scene.index}cat"
             graph.append(f"{joined}concat=n={len(track_labels)}:v=0:a=1[{merged}]")
+
+        if scene.sounds:
+            amb_labels = [merged]
+            for step, (_path, volume) in enumerate(scene.sounds):
+                label = f"amb{scene.index}x{step}"
+                graph.append(
+                    f"[{index}:a]aresample=48000,"
+                    f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                    f"volume={volume:.4f}[{label}]"
+                )
+                amb_labels.append(label)
+                index += 1
+            joined = "".join(f"[{label}]" for label in amb_labels)
+            mixed = f"s{scene.index}bed"
+            graph.append(
+                f"{joined}amix=inputs={len(amb_labels)}:duration=first:"
+                f"dropout_transition=0:normalize=0[{mixed}]"
+            )
+            merged = mixed
+
         scene_labels.append(merged)
 
     if len(scene_labels) == 1:
@@ -665,6 +988,7 @@ def main() -> int:
         open_close_fade=float(defaults.get("open_close_fade", 2)),
         quality=quality,
         audio_only=bool(args.audio),
+        overlays=script.get("overlays"),
     )
 
     if args.print_command:

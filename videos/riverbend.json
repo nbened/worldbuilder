@@ -27,25 +27,161 @@
       "effects": [],
       "animations": [
         {
-          "file": "assets/animations/Single_locked_off_static_shot__gwr_video_mvp.mp4",
+          "file": "assets/animations/chimney.mp4",
           "x": 0.6477063588627051,
           "y": 0.004294713741282921,
-          "w": 0.3468573098104508
+          "w": 0.3468573098104508,
+          "brightness": 100,
+          "speed": 100,
+          "aspect": "native",
+          "soft_edges": true,
+          "loop_in": 0,
+          "loop_out": 0
         }
-      ]
+      ],
+      "sounds": [
+        {
+          "file": "assets/sounds/crickets.mp3",
+          "volume": 18
+        }
+      ],
+      "image_prompt": "",
+      "music_prompt": ""
     },
     {
-      "title": "Riverbend Coffee",
-      "image": "assets/images/harvest-festival.png",
+      "title": "Waterfront",
+      "image": "assets/images/waterfront.png",
+      "map": {
+        "seconds": 0
+      },
+      "pan": "none",
+      "zoom": 1,
+      "tracks": [],
+      "sounds": [],
+      "effects": [],
+      "animations": [
+        {
+          "file": "assets/animations/babblingbrook.mov",
+          "x": 0,
+          "y": 0.000244140625,
+          "w": 0.32823418222821604,
+          "brightness": 100,
+          "saturation": 100,
+          "speed": 100,
+          "aspect": "native",
+          "soft_edges": true,
+          "loop_in": null,
+          "loop_out": null
+        }
+      ],
+      "image_prompt": "SCENE: A cobblestone market street in a small autumn town, mid \nafternoon, at the height of a harvest market.\n\nA brick bookshop with tall lit windows and a gold-lettered sign \nreading RIVERBEND BOOKS anchors the right side of the frame, its \nshelves visible through the glass. Beside it a stone-fronted cafe with \na striped awning and a hanging sign reading CORNER COFFEE. A red and \nwhite striped market canopy stands on the left over tables of \npumpkins, gourds and preserves, with stacked hay bales and a wooden \nhandcart loaded with squash. A chalkboard menu leans against a crate.\n\nThirty or more handcrafted figures fill the street, standing in small \nclusters, browsing tables, carrying baskets, talking in pairs. Iron \nlamp posts line the cobbles. Drifts of fallen leaves gather along the \ngutters and between the stones. A shallow stream runs behind a wooden \nrailing on the far left, crossed by a low stone arch bridge, with more \nof the town receding uphill into soft focus beyond.\n\nLIGHT: Late afternoon, warm and low. Golden daylight rakes across the \ncobblestones from the left, casting long soft shadows. The shop \nwindows and street lamps are already lit, glowing warm amber against \nthe cooler daylight. Bright but not harsh, with rich falloff into the \nblurred background.\n\nCAST: One figure wears a dusty rose coat, the only cool pink in the \nframe, clearly distinct from the warm reds and rusts worn by others. \nShe stands near the market canopy with her back half turned, partly \nhidden behind a stack of hay bales. Small in frame, not the focal \npoint, and not centered.\n\nCAMERA: Elevated three-quarter view, roughly forty degrees above the \nstreet, close in, as if leaning over a model railway table. Never at \nthe figures' eye level. Shallow tilt-shift depth of field with the \nmarket stall and the near cobbles in sharp focus, the far end of the \nstreet and the bridge softly blurred.\n\nMOOD: Busy, warm, generous. The best hour of the best day of the \nseason, with the light already starting to go.",
+      "music_prompt": "Clarinet lead playing a bright melodic line over a four-piece band.\nArchtop guitar and fiddle chopping rhythm on the offbeats, upright\nbass walking, brushed snare with a light shuffle. Occasional muted\ncornet answering the clarinet. F major, 96 BPM, swung eighths.\nFull and lively, the busiest and loudest arrangement, but still\nonly four players in a small room."
+    },
+    {
+      "title": "Campfire",
+      "image": "assets/images/fire.png",
       "map": {
         "seconds": 0
       },
       "pan": "none",
       "zoom": 1,
       "tracks": [
-        "assets/music/Sunlit Breakfast.wav",
-        "assets/music/Pumpkin Static.wav"
-      ]
+        "assets/music/Campfire Minor 2.mp3",
+        "assets/music/Campfire Minor.mp3"
+      ],
+      "effects": [
+        {
+          "file": "assets/effects/autumn-leaves.mp4",
+          "speed": 55
+        }
+      ],
+      "animations": [
+        {
+          "file": "assets/animations/smoke.mov",
+          "x": 0.7997812244815501,
+          "y": 0.23743709937822896,
+          "w": 0.10599041965234401,
+          "brightness": 100,
+          "saturation": 100,
+          "speed": 40,
+          "aspect": "portrait",
+          "soft_edges": true,
+          "loop_in": null,
+          "loop_out": 2.15
+        },
+        {
+          "file": "assets/animations/campfire.mp4",
+          "x": 0.3750958532574533,
+          "y": 0.5646439624654837,
+          "w": 0.28,
+          "brightness": 100,
+          "saturation": 100,
+          "speed": 100,
+          "aspect": "native",
+          "soft_edges": true,
+          "loop_in": null,
+          "loop_out": 10
+        },
+        {
+          "file": "assets/animations/coffee stand.mp4",
+          "x": 0.03405635621856367,
+          "y": 0.48351651373072996,
+          "w": 0.34043880530123755,
+          "brightness": 100,
+          "saturation": 100,
+          "speed": 100,
+          "aspect": "native",
+          "soft_edges": true,
+          "loop_in": null,
+          "loop_out": null
+        }
+      ],
+      "sounds": [
+        {
+          "file": "assets/sounds/crickets.mp3",
+          "volume": 17
+        }
+      ],
+      "image_prompt": "SCENE: A fire clearing on a wooded ridge above the town, at dusk.\n\nA ring of rough grey stones encircles a small campfire burning low \nand bright at the center of a gravel clearing. Four handcrafted \nfigures sit around it in weathered wooden Adirondack chairs, angled \ninward toward the flames, seated naturally with relaxed posture. A \nfifth figure sits slightly apart on a fallen log at the edge of the \nring. A stack of split logs rests to one side, a battered tin coffee \npot sits on a flat stone near the fire, and an iron lantern hangs \nunlit from a low branch.\n\nThe clearing is enclosed by pines and autumn maples in deep rust and \namber, with mossy rock outcrops and drifts of fallen leaves across \nthe gravel. Through a gap in the trees at the far edge of the frame, \nfar below and softly out of focus, a few warm lit windows of the \ntown are just visible, with the faint glow of a locomotive headlamp \non the rail line beyond.\n\nLIGHT: The campfire is the dominant light source and the scene is lit \nalmost entirely by it. Warm orange light falls across the stones, the \ngravel, the chairs, and the figures' faces and hands, falling off \nquickly into darkness at the edges of the clearing. Long soft shadows \nstretch outward from the fire ring. Above the treeline the sky is \ndeep dusk blue, the last cold light of the day, contrasting against \nthe warm firelight below.\n\nCAST: One figure wears a dusty rose coat, the only cool pink in the \nframe. She stands at the edge of the clearing near the stacked logs, \nhalf turned away, partially obscured by a chair back. She is small in \nframe and not the focal point.\n\nCAMERA: Elevated three-quarter view, roughly forty degrees above the \nclearing, close in, as if leaning over a model railway table. Never at \nthe figures' eye level. Shallow tilt-shift depth of field with the \nfire ring in sharp focus and the treeline and distant town softly \nblurred.\n\nMOOD: Quiet, intimate, the end of the day. Warm but with an ache \nunder it, the last good evening before the season turns.",
+      "music_prompt": "Solo fingerpicked acoustic archtop guitar, close-mic'd and intimate.\nA single fiddle sustains a low drone far in the background, almost\ninaudible. No bass, no drums, no piano. D minor, 58 BPM, free and\nunhurried, slight rubato. Sparse, lots of space between phrases.\nVery quiet dynamics throughout, never builds."
     }
-  ]
+  ],
+  "overlays": {
+    "credit": {
+      "enabled": false,
+      "text": "Built with hearthbound.com",
+      "x": 0.035130789620535716,
+      "y": 0.899784195244448,
+      "show_seconds": 5
+    },
+    "now_playing": {
+      "enabled": false,
+      "x": 0.6768876981187141,
+      "y": 0.8541152320988461,
+      "streaming_from": "hearthbound.com",
+      "show_seconds": 5
+    }
+  },
+  "feeling": "I think end of Summer and beginning of Fall there's something in the air about \"a lot of things are gonna change, but it'll be beautiful even if new\" ",
+  "prompt": "Museum-quality handcrafted miniature diorama, photographed as if it were a real physical scale model. Hyperrealistic miniature craftsmanship with meticulously detailed architecture, tiny handmade props, realistic wood grain, painted plaster, textured stone, brass, aged metals, woven fabrics, ceramic, glass, and miniature foliage. Every object feels tactile and hand-built rather than computer generated. Warm cinematic lighting with practical lamps, glowing windows, soft volumetric light, subtle bloom, rich golden highlights, and gentle shadows. Premium color grading featuring warm amber, honey, cream, walnut brown, muted greens, burnt orange, soft reds, and natural neutrals. No oversaturated colors. Tiny handcrafted human figures with realistic painted faces and clothing, posed naturally with subtle imperfections. Objects show slight wear and lived-in character instead of looking pristine. Highly realistic physical materials including glossy glass reflections, matte painted wood, textured brick, wet stone, polished brass, tiny leaves, moss, cloth fibers, and realistic weathering. The scene should look like an expensive handcrafted railway exhibition rather than a toy. Elegant composition with layered depth, atmospheric perspective, beautiful bokeh, soft reflections, believable scale cues, and premium commercial photography aesthetics. Calm, cozy, nostalgic, timeless, inviting, sophisticated, tactile, handcrafted, believable.",
+  "destinations": [
+    "sytion",
+    "coff",
+    "sd"
+  ],
+  "cast": [
+    {
+      "image": "",
+      "note": ""
+    },
+    {
+      "image": "",
+      "note": ""
+    },
+    {
+      "image": "",
+      "note": ""
+    }
+  ],
+  "music_prompt": "1930s small-town acoustic jazz. Two to four players only, no\norchestra. Upright bass, brushed snare, archtop guitar, clarinet,\nmuted cornet, fiddle, upright piano. Instrumental, no vocals.\nRecorded to shellac in a wooden room, ribbon mic warmth, faint tape\nhiss, no modern reverb. Wistful but warm, minor sixths, unresolved\nturnarounds."
 }

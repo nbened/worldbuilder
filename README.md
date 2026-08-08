@@ -6,16 +6,29 @@ order you want, generate the video.
 
 ## The image prompt
 
-This is the house style. Keep it verbatim and append the specific scene
+This is the official house style. Keep it verbatim and append the specific scene
 description to the end of it.
 
-> Museum-quality photorealistic miniature diorama, handcrafted scale model,
-> ultra-detailed macro photography, tilt-shift effect, shallow depth of field,
-> realistic wood grain, woven fabrics, tiny handcrafted foliage, premium model
-> railroad scenery, soft cinematic golden-hour lighting, hygge aesthetic, subtle
-> imperfections, believable materials, highly tactile, calm, airy, elegant, not
-> cartoonish, not toy-like, looks like a real handcrafted miniature photographed
-> with a 100mm macro lens.
+> Museum-quality handcrafted miniature diorama, photographed as if it were a
+> real physical scale model. Hyperrealistic miniature craftsmanship with
+> meticulously detailed architecture, tiny handmade props, realistic wood grain,
+> painted plaster, textured stone, brass, aged metals, woven fabrics, ceramic,
+> glass, and miniature foliage. Every object feels tactile and hand-built rather
+> than computer generated. Warm cinematic lighting with practical lamps, glowing
+> windows, soft volumetric light, subtle bloom, rich golden highlights, and
+> gentle shadows. Premium color grading featuring warm amber, honey, cream,
+> walnut brown, muted greens, burnt orange, soft reds, and natural neutrals. No
+> oversaturated colors. Tiny handcrafted human figures with realistic painted
+> faces and clothing, posed naturally with subtle imperfections. Objects show
+> slight wear and lived-in character instead of looking pristine. Highly
+> realistic physical materials including glossy glass reflections, matte painted
+> wood, textured brick, wet stone, polished brass, tiny leaves, moss, cloth
+> fibers, and realistic weathering. The scene should look like an expensive
+> handcrafted railway exhibition rather than a toy. Elegant composition with
+> layered depth, atmospheric perspective, beautiful bokeh, soft reflections,
+> believable scale cues, and premium commercial photography aesthetics. Calm,
+> cozy, nostalgic, timeless, inviting, sophisticated, tactile, handcrafted,
+> believable.
 
 Videos are **3:2**, matching the stills. Render them at 2× the output frame or
 larger (3240×2160 for a 1620×1080 video) — the slow pan crops into the image, so

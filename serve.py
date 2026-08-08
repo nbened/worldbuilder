@@ -37,6 +37,12 @@ UI = ROOT / "ui"
 VIDEOS = ROOT / "videos"
 CACHE = ROOT / ".cache" / "thumbs"
 AUDIO_CACHE = ROOT / ".cache" / "audio"
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+
+
+def python_bin() -> str:
+    """Prefer the project venv so Pillow (overlay burn-in) is available."""
+    return str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 AUDIO_SUFFIXES = {".mp3", ".m4a", ".wav", ".flac", ".aac", ".ogg"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv"}
@@ -76,7 +82,7 @@ def scan(folder: Path, suffixes: set[str]) -> list[dict]:
     for path in sorted(folder.rglob("*")):
         if path.is_file() and path.suffix.lower() in suffixes:
             entry = {"path": path.relative_to(ROOT).as_posix(), "name": path.stem}
-            if path.suffix.lower() in AUDIO_SUFFIXES:
+            if path.suffix.lower() in AUDIO_SUFFIXES | VIDEO_SUFFIXES:
                 entry["duration"] = probe_duration(path) or 0.0
             found.append(entry)
     return found
@@ -87,6 +93,19 @@ def output_path(script: dict, scene: int | None = None) -> Path:
     if scene is not None:
         return path.with_name(f"{path.stem}-scene{scene}{path.suffix}")
     return path
+
+
+def output_status(path: Path, script_mtime: float | None = None) -> dict:
+    """Describe a render file under out/. ready means present and not older than the script."""
+    if not path.exists():
+        return {"ready": False, "name": path.name, "stale": False, "exists": False}
+    stale = bool(script_mtime is not None and path.stat().st_mtime < script_mtime)
+    return {
+        "ready": not stale,
+        "name": path.name,
+        "stale": stale,
+        "exists": True,
+    }
 
 
 def video_file(video_id: str) -> Path | None:
@@ -129,14 +148,12 @@ def list_videos() -> list[dict]:
         script = load_script(path)
         scenes = script.get("scenes", [])
         thumb = next((scene.get("image") for scene in scenes if scene.get("image")), "")
-        video_out = output_path(script)
-        scene_outs = {}
-        for index in range(1, len(scenes) + 1):
-            scene_file = output_path(script, scene=index)
-            scene_outs[str(index)] = {
-                "ready": scene_file.exists(),
-                "name": scene_file.name,
-            }
+        script_mtime = path.stat().st_mtime
+        video_out = output_status(output_path(script), script_mtime)
+        scene_outs = {
+            str(index): output_status(output_path(script, scene=index), script_mtime)
+            for index in range(1, len(scenes) + 1)
+        }
         items.append(
             {
                 "id": path.stem,
@@ -145,7 +162,7 @@ def list_videos() -> list[dict]:
                 "duration": script_duration(script),
                 "thumb": thumb,
                 "outputs": {
-                    "video": {"ready": video_out.exists(), "name": video_out.name},
+                    "video": video_out,
                     "scenes": scene_outs,
                 },
             }
@@ -155,14 +172,12 @@ def list_videos() -> list[dict]:
 
 def collect_state(script_path: Path, video_id: str) -> dict:
     script = load_script(script_path)
-    video_out = output_path(script)
-    scene_outs = {}
-    for index in range(1, len(script.get("scenes", [])) + 1):
-        scene_file = output_path(script, scene=index)
-        scene_outs[str(index)] = {
-            "ready": scene_file.exists(),
-            "name": scene_file.name,
-        }
+    script_mtime = script_path.stat().st_mtime if script_path.exists() else None
+    video_out = output_status(output_path(script), script_mtime)
+    scene_outs = {
+        str(index): output_status(output_path(script, scene=index), script_mtime)
+        for index in range(1, len(script.get("scenes", [])) + 1)
+    }
     return {
         "id": video_id,
         "file": script_path.name,
@@ -171,11 +186,12 @@ def collect_state(script_path: Path, video_id: str) -> dict:
             "images": scan(ROOT / "assets" / "images", IMAGE_SUFFIXES)
             + scan(ROOT / "assets" / "maps", IMAGE_SUFFIXES),
             "music": scan(ROOT / "assets" / "music", AUDIO_SUFFIXES),
+            "sounds": scan(ROOT / "assets" / "sounds", AUDIO_SUFFIXES),
             "effects": scan(ROOT / "assets" / "effects", VIDEO_SUFFIXES),
             "animations": scan(ROOT / "assets" / "animations", VIDEO_SUFFIXES),
         },
         "outputs": {
-            "video": {"ready": video_out.exists(), "name": video_out.name},
+            "video": video_out,
             "scenes": scene_outs,
         },
         "render": render.snapshot(),
@@ -263,7 +279,7 @@ class Render:
         return True
 
     def _run(self, script_path: Path, scene: int | None, target: Path) -> None:
-        command = [sys.executable, str(ROOT / "build.py"), str(script_path), "--progress"]
+        command = [python_bin(), str(ROOT / "build.py"), str(script_path), "--progress"]
         if scene is not None:
             command += ["--scene", str(scene)]
         try:
@@ -332,13 +348,23 @@ def mixed_audio(script_path: Path, scene_index: int | None = None) -> Path | Non
     if not tracks:
         return None
 
+    sounds = []
+    for scene in scene_list:
+        for entry in scene.get("sounds", []) or []:
+            path = entry if isinstance(entry, str) else entry.get("file", "")
+            volume = 55 if isinstance(entry, str) else entry.get("volume", 55)
+            # Match build.py presence curve so preview cache invalidates with gain changes.
+            gain = max(0.0, min(float(volume) / 100.0 * 2.2, 2.5))
+            sounds.append(f"{path}@{gain:.4f}")
+
     defaults = script.get("defaults", {})
     parts = [
         f"scene:{scene_index if scene_index is not None else 'all'}",
         str(defaults.get("track_crossfade", 2)),
         str(defaults.get("open_close_fade", 2)),
+        f"sounds:{','.join(sounds)}",
     ]
-    for relative in tracks:
+    for relative in [*tracks, *[item.split("@", 1)[0] for item in sounds]]:
         source = ROOT / relative
         if not source.exists():
             return None
@@ -352,7 +378,7 @@ def mixed_audio(script_path: Path, scene_index: int | None = None) -> Path | Non
         if target.exists():
             return target
         AUDIO_CACHE.mkdir(parents=True, exist_ok=True)
-        command = [sys.executable, str(ROOT / "build.py"), str(script_path), "--audio", str(target)]
+        command = [python_bin(), str(ROOT / "build.py"), str(script_path), "--audio", str(target)]
         if scene_index is not None:
             command += ["--scene", str(scene_index + 1)]
         result = subprocess.run(command, capture_output=True, text=True, cwd=ROOT)
@@ -369,6 +395,7 @@ def safe_path(relative: str) -> Path | None:
 ASSET_FOLDERS = {
     "images": (ROOT / "assets" / "images", IMAGE_SUFFIXES),
     "music": (ROOT / "assets" / "music", AUDIO_SUFFIXES),
+    "sounds": (ROOT / "assets" / "sounds", AUDIO_SUFFIXES),
     "animations": (ROOT / "assets" / "animations", VIDEO_SUFFIXES),
 }
 
@@ -397,7 +424,9 @@ def safe_asset_delete(relative: str) -> Path | None:
     allowed = [
         (ROOT / "assets" / "images").resolve(),
         (ROOT / "assets" / "music").resolve(),
+        (ROOT / "assets" / "sounds").resolve(),
         (ROOT / "assets" / "animations").resolve(),
+        (ROOT / "assets" / "effects").resolve(),
     ]
     return path if any(folder in path.parents or path.parent == folder for folder in allowed) else None
 
@@ -588,6 +617,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404, "nothing rendered yet")
                 return
             self.send_media(target, download_as=target.name)
+            return
+        if route == "/download-asset":
+            source = safe_path((self.query().get("path") or [""])[0])
+            if not source:
+                self.send_error(404)
+                return
+            allowed = [
+                (ROOT / "assets" / "images").resolve(),
+                (ROOT / "assets" / "maps").resolve(),
+            ]
+            if not any(folder in source.parents or source.parent == folder for folder in allowed):
+                self.send_error(403, "not an image asset")
+                return
+            name = Path((self.query().get("name") or [source.name])[0]).name or source.name
+            self.send_media(source, download_as=name)
             return
         if route == "/thumb":
             source = safe_path((self.query().get("path") or [""])[0])
