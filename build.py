@@ -611,8 +611,13 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             incoming = bridges_after.get(index - 3) if index >= 3 else None
         own_map_hold = min(max(0.0, own_map_hold), audio_duration * 0.5)
 
+        # Mid incoming is drawn on the previous scene (merged overlay), so it must
+        # not consume this scene's overlay budget.
+        incoming_here = incoming if incoming and incoming.mode != "mid" else None
         in_hold = (
-            min(max(0.0, incoming.in_hold), audio_duration * 0.45) if incoming else 0.0
+            min(max(0.0, incoming_here.in_hold), audio_duration * 0.45)
+            if incoming_here
+            else 0.0
         )
         out_hold = (
             min(max(0.0, outgoing.out_hold), audio_duration * 0.45) if outgoing else 0.0
@@ -674,8 +679,12 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             raise BuildError(f"scene {index} ({title}) has no video segments")
 
         bridge_overlays: list[dict] = []
-        if in_hold > 0.001 and incoming:
-            # Start of this scene: map overlay, with zoom depending on mode / includes.
+        # Mid transitions used to be two abutting overlays (out half on this scene,
+        # in half on the next). At the audio cut that seam can drop for a frame and
+        # flash the scene hard-cut underneath. Mid bridges are one continuous overlay
+        # that starts on this scene and extends into the next.
+        if in_hold > 0.001 and incoming and incoming.mode != "mid":
+            # Opening (or non-mid) map at the start of this scene.
             has_start = bool(incoming.zoom_start) and incoming.zoom_out_span > 0.001
             has_end = bool(incoming.zoom_end) and incoming.zoom_in_span > 0.001
             if incoming.mode == "open" and has_start and has_end:
@@ -724,54 +733,104 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                 }
             )
         if out_hold > 0.001 and outgoing:
-            # End of this scene: optionally open on Start and pull out, then hold full map.
             has_start = bool(outgoing.zoom_start) and outgoing.zoom_out_span > 0.001
             has_end = bool(outgoing.zoom_end) and outgoing.zoom_in_span > 0.001
-            if outgoing.mode == "close" and has_start and has_end:
-                zoom_dir = "inout"
-                zoom = outgoing.zoom_end
-                zoom_start = outgoing.zoom_start
-                style = "fade_zoom"
-                zoom_span = outgoing.zoom_in_span
-                zoom_out_span = outgoing.zoom_out_span
-            elif has_start:
-                zoom_dir = "out"
-                zoom = outgoing.zoom_start
-                zoom_start = None
-                style = "fade_zoom"
-                zoom_span = outgoing.zoom_out_span
-                zoom_out_span = 0.0
-            elif outgoing.mode == "close" and has_end:
-                zoom_dir = "in"
-                zoom = outgoing.zoom_end
-                zoom_start = None
-                style = "fade_zoom"
-                zoom_span = outgoing.zoom_in_span
-                zoom_out_span = 0.0
+            if outgoing.mode == "mid":
+                # Full mid bridge: zoom out → hold → zoom in, spanning the cut.
+                mid_in = max(0.0, float(outgoing.in_hold))
+                total_dur = out_hold + mid_in
+                if has_start and has_end:
+                    zoom_dir = "inout"
+                    zoom = outgoing.zoom_end
+                    zoom_start = outgoing.zoom_start
+                    style = "fade_zoom"
+                    zoom_span = outgoing.zoom_in_span
+                    zoom_out_span = outgoing.zoom_out_span
+                elif has_start:
+                    zoom_dir = "out"
+                    zoom = outgoing.zoom_start
+                    zoom_start = None
+                    style = "fade_zoom"
+                    zoom_span = outgoing.zoom_out_span
+                    zoom_out_span = 0.0
+                elif has_end:
+                    zoom_dir = "in"
+                    zoom = outgoing.zoom_end
+                    zoom_start = None
+                    style = "fade_zoom"
+                    zoom_span = outgoing.zoom_in_span
+                    zoom_out_span = 0.0
+                else:
+                    zoom_dir = "out"
+                    zoom = None
+                    zoom_start = None
+                    style = "fade"
+                    zoom_span = 0.0
+                    zoom_out_span = 0.0
+                bridge_overlays.append(
+                    {
+                        "image": outgoing.map_image,
+                        "start": max(0.0, audio_duration - out_hold),
+                        "duration": total_dur,
+                        "fade_in": outgoing.fade_seconds,
+                        "fade_out": outgoing.fade_seconds,
+                        "label": outgoing.title,
+                        "style": style,
+                        "zoom": zoom,
+                        "zoom_start": zoom_start,
+                        "zoom_dir": zoom_dir,
+                        "zoom_span": zoom_span,
+                        "zoom_out_span": zoom_out_span,
+                        "animations": list(outgoing.animations or []),
+                    }
+                )
             else:
-                zoom_dir = "out"
-                zoom = None
-                zoom_start = None
-                style = "fade"
-                zoom_span = 0.0
-                zoom_out_span = 0.0
-            bridge_overlays.append(
-                {
-                    "image": outgoing.map_image,
-                    "start": max(0.0, audio_duration - out_hold),
-                    "duration": out_hold,
-                    "fade_in": outgoing.fade_seconds,
-                    "fade_out": 0.0,
-                    "label": outgoing.title,
-                    "style": style,
-                    "zoom": zoom,
-                    "zoom_start": zoom_start,
-                    "zoom_dir": zoom_dir,
-                    "zoom_span": zoom_span,
-                    "zoom_out_span": zoom_out_span,
-                    "animations": list(outgoing.animations or []),
-                }
-            )
+                # Close (or legacy out-only): map at the end of this scene.
+                if outgoing.mode == "close" and has_start and has_end:
+                    zoom_dir = "inout"
+                    zoom = outgoing.zoom_end
+                    zoom_start = outgoing.zoom_start
+                    style = "fade_zoom"
+                    zoom_span = outgoing.zoom_in_span
+                    zoom_out_span = outgoing.zoom_out_span
+                elif has_start:
+                    zoom_dir = "out"
+                    zoom = outgoing.zoom_start
+                    zoom_start = None
+                    style = "fade_zoom"
+                    zoom_span = outgoing.zoom_out_span
+                    zoom_out_span = 0.0
+                elif outgoing.mode == "close" and has_end:
+                    zoom_dir = "in"
+                    zoom = outgoing.zoom_end
+                    zoom_start = None
+                    style = "fade_zoom"
+                    zoom_span = outgoing.zoom_in_span
+                    zoom_out_span = 0.0
+                else:
+                    zoom_dir = "out"
+                    zoom = None
+                    zoom_start = None
+                    style = "fade"
+                    zoom_span = 0.0
+                    zoom_out_span = 0.0
+                bridge_overlays.append(
+                    {
+                        "image": outgoing.map_image,
+                        "start": max(0.0, audio_duration - out_hold),
+                        "duration": out_hold,
+                        "fade_in": outgoing.fade_seconds,
+                        "fade_out": 0.0,
+                        "label": outgoing.title,
+                        "style": style,
+                        "zoom": zoom,
+                        "zoom_start": zoom_start,
+                        "zoom_dir": zoom_dir,
+                        "zoom_span": zoom_span,
+                        "zoom_out_span": zoom_out_span,
+                        "animations": list(outgoing.animations or []),
+                    }
+                )
 
         scene = Scene(
             index=index,
