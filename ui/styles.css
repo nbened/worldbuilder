@@ -2128,6 +2128,15 @@ button {
   pointer-events: none;
   /* No CSS transition — video preview updates every frame; easing looked choppy. */
   will-change: transform, opacity;
+  overflow: hidden;
+}
+
+.picture-map-still {
+  z-index: 0;
+}
+
+.picture-map-motion {
+  z-index: 2;
 }
 
 .stage .picture-still {

@@ -259,14 +259,16 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
         return name if name in TRANSITION_STYLES else "fade_zoom"
 
     def clamp_zoom_rect(block: dict | None, fallback: dict) -> dict:
+        """Zoom targets: fixed 1/4 picture width, 16:9 in the 3:2 frame."""
+        want = (16 / 9) * (2 / 3)
+        w = 0.25
+        h = w / want
         src = block if isinstance(block, dict) else {}
         try:
-            x = min(1.0, max(0.0, float(src.get("x", fallback["x"]))))
-            y = min(1.0, max(0.0, float(src.get("y", fallback["y"]))))
-            w = min(1.0 - x, max(0.05, float(src.get("w", fallback["w"]))))
-            h = min(1.0 - y, max(0.05, float(src.get("h", fallback["h"]))))
+            x = min(1.0 - w, max(0.0, float(src.get("x", fallback["x"]))))
+            y = min(1.0 - h, max(0.0, float(src.get("y", fallback["y"]))))
         except (TypeError, ValueError):
-            return dict(fallback)
+            return {"x": fallback.get("x", 0.15), "y": fallback.get("y", 0.2), "w": w, "h": h}
         return {"x": x, "y": y, "w": w, "h": h}
 
     def parse_fade_zoom(
@@ -276,8 +278,10 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
         block = raw.get("fade_zoom")
         if not isinstance(block, dict):
             return None, None, 0.0, 0.0
-        default_start = {"x": 0.15, "y": 0.2, "w": 0.35, "h": 0.4}
-        default_end = {"x": 0.5, "y": 0.25, "w": 0.35, "h": 0.4}
+        # Fixed ¼-wide 16:9 in a 3:2 frame → h = 0.25 * 27/32
+        _zw, _zh = 0.25, 0.25 * 27 / 32
+        default_start = {"x": 0.15, "y": 0.2, "w": _zw, "h": _zh}
+        default_end = {"x": 0.5, "y": 0.25, "w": _zw, "h": _zh}
         try:
             zoom_hold = max(0.0, float(block.get("seconds", 3)))
         except (TypeError, ValueError):
@@ -418,8 +422,9 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             zoom_start, zoom_end, zoom_out_span, zoom_in_span = parse_fade_zoom(zoom_cfg)
             if not isinstance(zoom_cfg.get("fade_zoom"), dict):
                 # Style set but no block yet — default both sides.
-                zoom_start = {"x": 0.15, "y": 0.2, "w": 0.35, "h": 0.4}
-                zoom_end = {"x": 0.5, "y": 0.25, "w": 0.35, "h": 0.4}
+                _zw, _zh = 0.25, 0.25 * 27 / 32
+                zoom_start = {"x": 0.15, "y": 0.2, "w": _zw, "h": _zh}
+                zoom_end = {"x": 0.5, "y": 0.25, "w": _zw, "h": _zh}
                 zoom_out_span = 1.5
                 zoom_in_span = 1.5
         total_hold = map_hold + zoom_out_span + zoom_in_span

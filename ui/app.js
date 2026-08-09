@@ -598,8 +598,8 @@ function blankTransition() {
     seconds: DEFAULT_ZOOM_SECONDS,
     include_start: true,
     include_end: true,
-    start: { x: 0.15, y: 0.2, w: 0.35, h: 0.4 },
-    end: { x: 0.5, y: 0.25, w: 0.35, h: 0.4 },
+    start: defaultZoomRect(0.15, 0.2),
+    end: defaultZoomRect(0.5, 0.25),
   };
   return entry;
 }
@@ -609,22 +609,38 @@ const TRANSITION_FX = [
   { id: "fade_zoom", label: "Fade zoom" },
 ];
 
+/** Normalized w/h for a 16:9 zoom rect inside the 3:2 picture frame. */
+function zoomRectNormWH() {
+  return regionNormWH("landscape");
+}
+
+/** Fixed zoom target size: 1/4 of the picture wide, 16:9 tall. */
+const ZOOM_RECT_W = 0.25;
+
+function zoomRectSize() {
+  const want = zoomRectNormWH();
+  return { w: ZOOM_RECT_W, h: ZOOM_RECT_W / want };
+}
+
+function defaultZoomRect(x = 0.15, y = 0.2) {
+  const { w, h } = zoomRectSize();
+  return clampZoomRect({ x, y, w, h }, { x, y, w, h });
+}
+
 function clampZoomRect(rect, fallback) {
   const clamp01 = (value, fb) => {
     const n = Number(value);
     return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : fb;
   };
   const src = rect && typeof rect === "object" ? rect : {};
-  const fb = fallback || { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
-  const out = {
-    x: clamp01(src.x, fb.x),
-    y: clamp01(src.y, fb.y),
-    w: clamp01(src.w, fb.w),
-    h: clamp01(src.h, fb.h),
-  };
-  out.w = Math.min(1 - out.x, Math.max(0.05, out.w));
-  out.h = Math.min(1 - out.y, Math.max(0.05, out.h));
-  return out;
+  const { w, h } = zoomRectSize();
+  const fb = fallback || { x: 0.15, y: 0.2, w, h };
+  let x = clamp01(src.x, fb.x);
+  let y = clamp01(src.y, fb.y);
+  // Same size for every Start/End rect — only position varies.
+  x = Math.min(1 - w, Math.max(0, x));
+  y = Math.min(1 - h, Math.max(0, y));
+  return { x, y, w, h };
 }
 
 /** Normalize fade_zoom on this exact entry (no template resolve). */
@@ -634,8 +650,8 @@ function normalizeFadeZoomBlock(entry) {
       seconds: DEFAULT_ZOOM_SECONDS,
       include_start: true,
       include_end: true,
-      start: { x: 0.15, y: 0.2, w: 0.35, h: 0.4 },
-      end: { x: 0.5, y: 0.25, w: 0.35, h: 0.4 },
+      start: defaultZoomRect(0.15, 0.2),
+      end: defaultZoomRect(0.5, 0.25),
     };
   }
   if (!entry.fade_zoom || typeof entry.fade_zoom !== "object") {
@@ -646,13 +662,13 @@ function normalizeFadeZoomBlock(entry) {
   // Migrate legacy flat {x,y,w,h} into start/end rectangles.
   if (!z.start || typeof z.start !== "object") {
     if (Number.isFinite(Number(z.x)) || Number.isFinite(Number(z.w))) {
-      z.start = clampZoomRect(z, { x: 0.15, y: 0.2, w: 0.35, h: 0.4 });
+      z.start = clampZoomRect(z, defaultZoomRect(0.15, 0.2));
     } else {
-      z.start = { x: 0.15, y: 0.2, w: 0.35, h: 0.4 };
+      z.start = defaultZoomRect(0.15, 0.2);
     }
   }
   if (!z.end || typeof z.end !== "object") {
-    z.end = clampZoomRect(z.start, { x: 0.5, y: 0.25, w: 0.35, h: 0.4 });
+    z.end = clampZoomRect(z.start, defaultZoomRect(0.5, 0.25));
     if (Math.abs(z.end.x - z.start.x) < 0.02 && Math.abs(z.end.y - z.start.y) < 0.02) {
       z.end = clampZoomRect(
         { x: Math.min(0.55, z.start.x + 0.3), y: z.start.y, w: z.start.w, h: z.start.h },
@@ -660,8 +676,8 @@ function normalizeFadeZoomBlock(entry) {
       );
     }
   }
-  z.start = clampZoomRect(z.start, { x: 0.15, y: 0.2, w: 0.35, h: 0.4 });
-  z.end = clampZoomRect(z.end, { x: 0.5, y: 0.25, w: 0.35, h: 0.4 });
+  z.start = clampZoomRect(z.start, defaultZoomRect(0.15, 0.2));
+  z.end = clampZoomRect(z.end, defaultZoomRect(0.5, 0.25));
   delete z.x;
   delete z.y;
   delete z.w;
@@ -866,19 +882,14 @@ function fadeZoomGuide(which) {
         height: `${rect.h * 100}%`,
       },
       title: variant
-        ? `${label} · variant ${variant} — drag to move, corner to resize`
-        : `${label} zoom target — drag to move, corner to resize`,
+        ? `${label} · variant ${variant} — drag to move (fixed ¼-wide 16:9)`
+        : `${label} zoom target — drag to move (fixed ¼-wide 16:9)`,
       "data-zoom-which": which,
       onPointerdown: (event) => beginFadeZoomMove(event, which),
     },
     h("span", {
       class: "fade-zoom-label",
       text: variant ? `${label} · ${variant}` : label,
-    }),
-    h("div", {
-      class: "fade-zoom-handle",
-      title: "Resize",
-      onPointerdown: (event) => beginFadeZoomResize(event, which),
     })
   );
 }
@@ -980,7 +991,6 @@ function addTransitionVariantButton(template) {
 }
 
 function beginFadeZoomMove(event, which = "start") {
-  if (event.target.closest(".fade-zoom-handle")) return;
   event.preventDefault();
   event.stopPropagation();
   const picture = event.currentTarget.closest(".picture");
@@ -990,6 +1000,7 @@ function beginFadeZoomMove(event, which = "start") {
   state.editingTransitionVariant = editingTransitionPlacementIndex();
   const z = ensureFadeZoom(entry);
   const rect = z[which] || z.start;
+  Object.assign(rect, clampZoomRect(rect, rect));
   const box = picture.getBoundingClientRect();
   const startX = event.clientX;
   const startY = event.clientY;
@@ -1003,6 +1014,8 @@ function beginFadeZoomMove(event, which = "start") {
     rect.y = Math.min(1 - rect.h, Math.max(0, originY + (moveEvent.clientY - startY) / box.height));
     guide.style.left = `${rect.x * 100}%`;
     guide.style.top = `${rect.y * 100}%`;
+    guide.style.width = `${rect.w * 100}%`;
+    guide.style.height = `${rect.h * 100}%`;
   };
   const up = () => {
     guide.classList.remove("dragging");
@@ -1010,51 +1023,13 @@ function beginFadeZoomMove(event, which = "start") {
     guide.removeEventListener("pointermove", move);
     guide.removeEventListener("pointerup", up);
     guide.removeEventListener("pointercancel", up);
+    Object.assign(rect, clampZoomRect(rect, rect));
     ensureFadeZoom(entry);
     changed();
   };
   guide.addEventListener("pointermove", move);
   guide.addEventListener("pointerup", up);
   guide.addEventListener("pointercancel", up);
-}
-
-function beginFadeZoomResize(event, which = "start") {
-  event.preventDefault();
-  event.stopPropagation();
-  const handle = event.currentTarget;
-  const guide = handle.closest(".fade-zoom-guide");
-  const picture = guide?.closest(".picture");
-  if (!picture || !isTransitionScene()) return;
-  const entry = editingTransitionPlacement();
-  state.editingTransitionVariant = editingTransitionPlacementIndex();
-  const z = ensureFadeZoom(entry);
-  const rect = z[which] || z.start;
-  const box = picture.getBoundingClientRect();
-  const startX = event.clientX;
-  const startY = event.clientY;
-  const originW = rect.w;
-  const originH = rect.h;
-
-  guide.classList.add("dragging");
-  handle.setPointerCapture(event.pointerId);
-  const move = (moveEvent) => {
-    rect.w = Math.min(1 - rect.x, Math.max(0.05, originW + (moveEvent.clientX - startX) / box.width));
-    rect.h = Math.min(1 - rect.y, Math.max(0.05, originH + (moveEvent.clientY - startY) / box.height));
-    guide.style.width = `${rect.w * 100}%`;
-    guide.style.height = `${rect.h * 100}%`;
-  };
-  const up = () => {
-    guide.classList.remove("dragging");
-    handle.releasePointerCapture(event.pointerId);
-    handle.removeEventListener("pointermove", move);
-    handle.removeEventListener("pointerup", up);
-    handle.removeEventListener("pointercancel", up);
-    ensureFadeZoom(entry);
-    changed();
-  };
-  handle.addEventListener("pointermove", move);
-  handle.addEventListener("pointerup", up);
-  handle.addEventListener("pointercancel", up);
 }
 
 function isTransitionScene(entry = scene()) {
@@ -2395,28 +2370,33 @@ function paintOverlays() {
     }
   }
 
-  if (overlayUi.map) {
+  if (overlayUi.mapPlane || overlayUi.map) {
     const overlay = transitionOverlayAt(at);
     const path = overlay?.path || "";
     const opacity = overlay?.opacity ?? 0;
-    if (path && overlayUi.map.dataset.path !== path) {
-      overlayUi.map.dataset.path = path;
-      const wide = state.pictureExpanded ? 1600 : 1200;
-      overlayUi.map.style.backgroundImage = `url(/thumb?path=${encodeURIComponent(path)}&w=${wide})`;
-    } else if (!path && overlayUi.map.dataset.path !== "") {
-      overlayUi.map.dataset.path = "";
-      overlayUi.map.style.backgroundImage = "";
+    const mapStill = overlayUi.map;
+    const mapPlane = overlayUi.mapPlane || mapStill;
+    if (mapStill) {
+      if (path && mapStill.dataset.path !== path) {
+        mapStill.dataset.path = path;
+        const wide = state.pictureExpanded ? 1600 : 1200;
+        mapStill.style.backgroundImage = `url(/thumb?path=${encodeURIComponent(path)}&w=${wide})`;
+      } else if (!path && mapStill.dataset.path !== "") {
+        mapStill.dataset.path = "";
+        mapStill.style.backgroundImage = "";
+      }
     }
-    overlayUi.map.style.opacity = String(opacity);
-    overlayUi.map.classList.toggle("is-hidden", opacity <= 0.01);
+    mapPlane.style.opacity = String(opacity);
+    mapPlane.classList.toggle("is-hidden", opacity <= 0.01);
     if (overlay?.zoomRect && opacity > 0.01) {
-      applyFadeZoomStyle(overlayUi.map, overlay.zoomRect, overlay.zoomProgress ?? 0);
+      applyFadeZoomStyle(mapPlane, overlay.zoomRect, overlay.zoomProgress ?? 0);
     } else {
-      applyFadeZoomStyle(overlayUi.map, null, 0);
+      applyFadeZoomStyle(mapPlane, null, 0);
     }
   }
 
   syncVideoPreviewMotion(at);
+  syncVideoPreviewMapMotion(at);
 
   if (overlayUi.songTitle) {
     const song = currentSongAt(at, list);
@@ -3830,6 +3810,33 @@ function syncVideoPreviewMotion(at = player.at) {
     });
 }
 
+/** Map-bridge edits/anims ride with the overlay (and fade-zoom), not the scene under it. */
+function syncVideoPreviewMapMotion(at = player.at) {
+  if (!overlayUi?.mapMotion) return;
+  const overlay = transitionOverlayAt(at);
+  const template = overlay?.path && overlay?.entry ? resolveTransition(overlay.entry) : null;
+  const sig = template
+    ? [
+        template.id || "",
+        (template.edits || []).map((e) => e.file || "").join("|"),
+        (template.animations || []).map((a) => a.file || "").join("|"),
+      ].join("::")
+    : "";
+  if (overlayUi.mapMotionKey === sig) return;
+  overlayUi.mapMotionKey = sig;
+  overlayUi.mapMotion.replaceChildren();
+  if (!template) return;
+
+  (template.edits || []).forEach((edit) => {
+    const layer = previewEditLayer(edit);
+    if (layer) overlayUi.mapMotion.append(layer);
+  });
+  (template.animations || []).forEach((anim) => {
+    const layer = previewAnimLayer(anim);
+    if (layer) overlayUi.mapMotion.append(layer);
+  });
+}
+
 function videoPreview() {
   const expanded = state.pictureExpanded;
   const overlays = ensureOverlays();
@@ -3853,17 +3860,33 @@ function videoPreview() {
         "data-path": "",
       });
 
-  const mapLayer = h("div", {
-    class: "picture-still picture-map-overlay is-hidden",
+  const mapStill = h("div", {
+    class: "picture-still picture-map-still",
     "data-path": "",
-    style: { opacity: "0" },
   });
+  const mapMotion = h("div", {
+    class: "picture-motion picture-map-motion",
+    "aria-hidden": "true",
+  });
+  // Map still + transition edits/anims share one plane so fade-zoom keeps them pinned.
+  const mapPlane = h(
+    "div",
+    {
+      class: "picture-map-overlay picture-zoom-plane is-hidden",
+      style: { opacity: "0" },
+    },
+    mapStill,
+    mapMotion
+  );
 
   const motion = h("div", { class: "picture-motion", "aria-hidden": "true" });
 
   overlayUi = {
     still,
-    map: mapLayer,
+    map: mapStill,
+    mapPlane,
+    mapMotion,
+    mapMotionKey: null,
     motion,
     motionScene: null,
     credit: creditLayer,
@@ -3905,7 +3928,7 @@ function videoPreview() {
       },
       still,
       motion,
-      mapLayer,
+      mapPlane,
       !known && h("span", { class: "picture-empty", text: "Add a scene picture to preview lower thirds" }),
       creditLayer,
       songLayer
