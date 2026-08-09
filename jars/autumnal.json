@@ -1,0 +1,10 @@
+{
+  "title": "Autumnal Jar",
+  "descriptor": "world",
+  "summary": "A warm miniature autumn world — steam, market lights, and campfire glow.",
+  "rules": "Keep everything museum-quality and handcrafted. Warm amber lighting, lived-in wear, tilt-shift miniature scale. No modern tech, no harsh neon, no empty streets — always a few tiny figures living in the scene.",
+  "prompt": "Museum-quality handcrafted miniature diorama in peak autumn. Hyperrealistic physical materials, warm cinematic lamps, golden foliage, cozy denseness. Every place feels like somewhere you’d stay the night.",
+  "thumb": "assets/videos/landing-poster.jpg",
+  "hero": "assets/videos/landing-loop.mp4",
+  "videos": ["riverbend"]
+}

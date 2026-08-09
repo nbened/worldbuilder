@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Local editor for Cozy Journeys videos.
+"""Local editor for Wonderjar worlds (jars).
 
-Videos live in videos/*.json. The app is a small SPA:
+Jars → videos → scenes. Data lives in jars/*.json and videos/*.json.
 
-    /              list of videos
     /              landing
-    /videos        video list
+    /jars          jar (world) list
+    /jar?j=id      videos in a jar
     /video?v=id    arrange scenes
     /scene?v=id&s=0  edit one scene
 
@@ -35,6 +35,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 ROOT = Path(__file__).resolve().parent
 UI = ROOT / "ui"
 VIDEOS = ROOT / "videos"
+JARS = ROOT / "jars"
 CACHE = ROOT / ".cache" / "thumbs"
 AUDIO_CACHE = ROOT / ".cache" / "audio"
 VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
@@ -47,6 +48,7 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 AUDIO_SUFFIXES = {".mp3", ".m4a", ".wav", ".flac", ".aac", ".ogg"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv"}
 VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+JAR_ID = VIDEO_ID
 
 _durations: dict[tuple[str, int, int], float] = {}
 
@@ -224,38 +226,110 @@ def script_duration(script: dict) -> float:
     return max(0.0, total)
 
 
-def list_videos() -> list[dict]:
+def jar_file(jar_id: str) -> Path | None:
+    if not JAR_ID.fullmatch(jar_id or ""):
+        return None
+    path = (JARS / f"{jar_id}.json").resolve()
+    try:
+        path.relative_to(JARS.resolve())
+    except ValueError:
+        return None
+    return path
+
+
+def load_jar(path: Path) -> dict:
+    with path.open() as handle:
+        return json.load(handle)
+
+
+def video_catalog_entry(path: Path) -> dict:
+    script = load_script(path)
+    scenes = script.get("scenes", [])
+    thumb = next((scene.get("image") for scene in scenes if scene.get("image")), "")
+    script_mtime = path.stat().st_mtime
+    music = {item["path"]: item["duration"] for item in scan(ROOT / "assets" / "music", AUDIO_SUFFIXES)}
+    video_out = output_status(output_path(script), script_mtime)
+    scene_outs = {}
+    for index, entry in enumerate(scenes, start=1):
+        fingerprint = None if entry.get("is_transition") else scene_fingerprint(entry)
+        scene_outs[str(index)] = output_status(
+            output_path(script, scene=index),
+            expected_duration=expected_scene_duration(script, index, music),
+            fingerprint=fingerprint,
+        )
+    return {
+        "id": path.stem,
+        "title": script.get("project") or path.stem,
+        "jar": script.get("jar") or "",
+        "scenes": len(scenes),
+        "duration": script_duration(script),
+        "thumb": thumb,
+        "outputs": {
+            "video": video_out,
+            "scenes": scene_outs,
+        },
+    }
+
+
+def list_videos(jar_id: str | None = None) -> list[dict]:
+    """All videos, or videos belonging to a jar (jar.videos order, then jar field)."""
     VIDEOS.mkdir(parents=True, exist_ok=True)
-    items = []
+    if not jar_id:
+        return [video_catalog_entry(path) for path in sorted(VIDEOS.glob("*.json"))]
+
+    jar_path = jar_file(jar_id)
+    if not jar_path or not jar_path.exists():
+        return []
+    jar = load_jar(jar_path)
+    wanted = [str(v) for v in (jar.get("videos") or []) if v]
+    ordered: list[dict] = []
+    seen: set[str] = set()
+    for vid in wanted:
+        path = video_file(vid)
+        if path and path.exists():
+            ordered.append(video_catalog_entry(path))
+            seen.add(vid)
     for path in sorted(VIDEOS.glob("*.json")):
-        script = load_script(path)
-        scenes = script.get("scenes", [])
-        thumb = next((scene.get("image") for scene in scenes if scene.get("image")), "")
-        script_mtime = path.stat().st_mtime
-        music = {item["path"]: item["duration"] for item in scan(ROOT / "assets" / "music", AUDIO_SUFFIXES)}
-        video_out = output_status(output_path(script), script_mtime)
-        scene_outs = {}
-        for index, entry in enumerate(scenes, start=1):
-            fingerprint = None if entry.get("is_transition") else scene_fingerprint(entry)
-            scene_outs[str(index)] = output_status(
-                output_path(script, scene=index),
-                expected_duration=expected_scene_duration(script, index, music),
-                fingerprint=fingerprint,
-            )
+        if path.stem in seen:
+            continue
+        entry = video_catalog_entry(path)
+        if entry.get("jar") == jar_id:
+            ordered.append(entry)
+    return ordered
+
+
+def list_jars() -> list[dict]:
+    JARS.mkdir(parents=True, exist_ok=True)
+    items = []
+    for path in sorted(JARS.glob("*.json")):
+        jar = load_jar(path)
+        video_ids = [str(v) for v in (jar.get("videos") or []) if v]
         items.append(
             {
                 "id": path.stem,
-                "title": script.get("project") or path.stem,
-                "scenes": len(scenes),
-                "duration": script_duration(script),
-                "thumb": thumb,
-                "outputs": {
-                    "video": video_out,
-                    "scenes": scene_outs,
-                },
+                "title": jar.get("title") or path.stem,
+                "descriptor": jar.get("descriptor") or "world",
+                "summary": jar.get("summary") or "",
+                "thumb": jar.get("thumb") or "",
+                "hero": jar.get("hero") or "",
+                "videos": len(video_ids),
             }
         )
     return items
+
+
+def collect_jar(jar_id: str) -> dict | None:
+    path = jar_file(jar_id)
+    if not path or not path.exists():
+        return None
+    jar = load_jar(path)
+    videos = list_videos(jar_id)
+    return {
+        "id": jar_id,
+        "file": path.name,
+        "jar": jar,
+        "videos": videos,
+    }
 
 
 def collect_state(script_path: Path, video_id: str) -> dict:
@@ -726,21 +800,45 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         route = url.path
 
-        if route in ("/", "/videos", "/video", "/scene", "/index.html"):
+        if route in ("/", "/jars", "/jar", "/videos", "/video", "/scene", "/index.html"):
             self.send_file(UI / "index.html")
             return
         if route in ("/app.js", "/styles.css", "/site.json"):
             self.send_file(UI / route.lstrip("/"))
             return
+        if route == "/api/jars":
+            self.send_json({"jars": list_jars()})
+            return
+        if route == "/api/jar":
+            jar_id = (self.query().get("j") or [None])[0]
+            payload = collect_jar(jar_id or "")
+            if not payload:
+                self.send_json({"error": "unknown jar"}, status=404)
+                return
+            self.send_json(payload)
+            return
         if route == "/api/videos":
-            self.send_json({"videos": list_videos()})
+            jar_id = (self.query().get("j") or [None])[0]
+            self.send_json({"videos": list_videos(jar_id)})
             return
         if route == "/api/state":
             required = self.require_video()
             if not required:
                 return
             video_id, path = required
-            self.send_json(collect_state(path, video_id))
+            payload = collect_state(path, video_id)
+            jar_id = (self.query().get("j") or [None])[0] or (payload.get("script") or {}).get("jar")
+            if jar_id:
+                payload["jarId"] = jar_id
+                jar_payload = collect_jar(jar_id)
+                if jar_payload:
+                    payload["jar"] = jar_payload.get("jar")
+                    payload["jarMeta"] = {
+                        "id": jar_payload["id"],
+                        "title": jar_payload["jar"].get("title") or jar_payload["id"],
+                        "descriptor": jar_payload["jar"].get("descriptor") or "world",
+                    }
+            self.send_json(payload)
             return
         if route == "/api/render":
             self.send_json(render.snapshot())

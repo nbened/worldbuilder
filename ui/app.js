@@ -1,7 +1,12 @@
-// Landing → videos → video → scene. Paths: /, /videos, /video?v=, /scene?v=&s=
+// Landing → jars → jar → video → scene.
+// Paths: /, /jars, /jar?j=, /video?v=&j=, /scene?v=&s=&j=
 
 const state = {
-  page: "landing", // landing | list | video | scene
+  page: "landing", // landing | jars | jar | video | scene
+  jarId: null,
+  jar: null, // jar document (rules, prompt, …)
+  jarMeta: null, // { id, title, descriptor }
+  jars: [],
   videoId: null,
   site: null, // ui/site.json — landing copy, etc.
   videos: [],
@@ -149,23 +154,34 @@ function gripIcon() {
 
 /* ---------- routing ---------- */
 
+function withJarParam(url, jarId = state.jarId) {
+  if (!jarId) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}j=${encodeURIComponent(jarId)}`;
+}
+
 function readRoute() {
   const path = location.pathname.replace(/\/$/, "") || "/";
   const params = new URLSearchParams(location.search);
+  const jarId = params.get("j");
   if (path === "/video") {
-    return { page: "video", videoId: params.get("v"), sceneIndex: 0 };
+    return { page: "video", videoId: params.get("v"), sceneIndex: 0, jarId };
   }
   if (path === "/scene") {
     return {
       page: "scene",
       videoId: params.get("v"),
       sceneIndex: Math.max(0, Number(params.get("s") || 0)),
+      jarId,
     };
   }
-  if (path === "/videos") {
-    return { page: "list", videoId: null, sceneIndex: 0 };
+  if (path === "/jar") {
+    return { page: "jar", videoId: null, sceneIndex: 0, jarId: params.get("j") };
   }
-  return { page: "landing", videoId: null, sceneIndex: 0 };
+  if (path === "/jars" || path === "/videos") {
+    // /videos kept as alias → jars list
+    return { page: "jars", videoId: null, sceneIndex: 0, jarId: null };
+  }
+  return { page: "landing", videoId: null, sceneIndex: 0, jarId: null };
 }
 
 function go(
@@ -173,14 +189,23 @@ function go(
   {
     videoId = state.videoId,
     sceneIndex = state.sceneIndex,
+    jarId = state.jarId,
     editingVariant = undefined,
   } = {}
 ) {
   if (editingVariant !== undefined) state.editingTransitionVariant = editingVariant;
   let url = "/";
-  if (page === "list") url = "/videos";
-  if (page === "video") url = `/video?v=${encodeURIComponent(videoId)}`;
-  if (page === "scene") url = `/scene?v=${encodeURIComponent(videoId)}&s=${sceneIndex}`;
+  if (page === "jars" || page === "list") url = "/jars";
+  if (page === "jar") url = `/jar?j=${encodeURIComponent(jarId || "")}`;
+  if (page === "video") {
+    url = withJarParam(`/video?v=${encodeURIComponent(videoId)}`, jarId);
+  }
+  if (page === "scene") {
+    url = withJarParam(
+      `/scene?v=${encodeURIComponent(videoId)}&s=${sceneIndex}`,
+      jarId
+    );
+  }
   history.pushState({}, "", url);
   applyRoute();
 }
@@ -203,32 +228,59 @@ async function applyRoute() {
   if (route.page === "landing") {
     state.videoId = null;
     state.script = null;
+    state.jarId = null;
+    state.jar = null;
+    state.jarMeta = null;
     await loadSite();
     render();
     return;
   }
 
-  if (route.page === "list") {
+  if (route.page === "jars") {
     state.videoId = null;
     state.script = null;
-    await loadVideos();
+    state.jarId = null;
+    state.jar = null;
+    state.jarMeta = null;
+    await loadJars();
+    render();
+    return;
+  }
+
+  if (route.page === "jar") {
+    state.videoId = null;
+    state.script = null;
+    if (!route.jarId) {
+      history.replaceState({}, "", "/jars");
+      await applyRoute();
+      return;
+    }
+    const ok = await loadJar(route.jarId);
+    if (!ok) {
+      history.replaceState({}, "", "/jars");
+      await applyRoute();
+      return;
+    }
     render();
     return;
   }
 
   if (!route.videoId) {
-    history.replaceState({}, "", "/");
+    history.replaceState({}, "", "/jars");
     await applyRoute();
     return;
   }
 
   if (state.videoId !== route.videoId || !state.script) {
-    const ok = await loadVideo(route.videoId);
+    const ok = await loadVideo(route.videoId, route.jarId);
     if (!ok) {
-      history.replaceState({}, "", "/");
+      history.replaceState({}, "", "/jars");
       await applyRoute();
       return;
     }
+  } else if (route.jarId && route.jarId !== state.jarId) {
+    state.jarId = route.jarId;
+    await loadJar(route.jarId, { soft: true });
   }
 
   let nextScene = Math.min(route.sceneIndex, Math.max(0, scenes().length - 1));
@@ -239,7 +291,10 @@ async function applyRoute() {
       history.replaceState(
         {},
         "",
-        `/scene?v=${encodeURIComponent(state.videoId)}&s=${nextScene}`
+        withJarParam(
+          `/scene?v=${encodeURIComponent(state.videoId)}&s=${nextScene}`,
+          state.jarId
+        )
       );
     }
   }
@@ -2176,7 +2231,7 @@ function syncSceneTransitionPreview() {
 }
 
 function syncSource() {
-  if (state.page === "list") return;
+  if (state.page === "jars" || state.page === "jar" || state.page === "landing") return;
   const { key } = audioUrl();
   if (player.key === key) return;
   stopPreviewClock();
@@ -2657,23 +2712,57 @@ async function loadSite() {
 function landingCopy() {
   const landing = state.site?.landing || {};
   return {
-    title: landing.title || "Live in Your Dream World",
-    description: landing.description || "",
-    cta: landing.cta || "Enter",
+    brand: landing.brand || "Wonderjar",
+    title: landing.title || "Build a world worth staying in.",
+    description: landing.description || "Build it. Light it. Share it.",
+    cta: landing.cta || "Enter Riverbend",
     href: landing.href || "/video?v=riverbend",
     videoId: landing.videoId || "riverbend",
+    secondary: landing.secondary || "or build your own",
+    secondaryHref: landing.secondaryHref || "/videos",
     video: landing.video || "/assets/videos/landing-loop.mp4",
     poster: landing.poster || "/assets/videos/landing-poster.jpg",
   };
 }
 
-async function loadVideos() {
-  const data = await (await fetch("/api/videos")).json();
+async function loadJars() {
+  const data = await (await fetch("/api/jars")).json();
+  state.jars = data.jars || [];
+}
+
+async function loadJar(jarId, { soft = false } = {}) {
+  const response = await fetch(`/api/jar?j=${encodeURIComponent(jarId)}`);
+  if (!response.ok) {
+    if (!soft) {
+      state.jarId = null;
+      state.jar = null;
+      state.jarMeta = null;
+      state.videos = [];
+    }
+    return false;
+  }
+  const data = await response.json();
+  state.jarId = data.id;
+  state.jar = data.jar || null;
+  state.jarMeta = {
+    id: data.id,
+    title: (data.jar && data.jar.title) || data.id,
+    descriptor: (data.jar && data.jar.descriptor) || "world",
+  };
+  state.videos = data.videos || [];
+  return true;
+}
+
+async function loadVideos(jarId = null) {
+  const qs = jarId ? `?j=${encodeURIComponent(jarId)}` : "";
+  const data = await (await fetch(`/api/videos${qs}`)).json();
   state.videos = data.videos || [];
 }
 
-async function loadVideo(videoId) {
-  const response = await fetch(`/api/state?v=${encodeURIComponent(videoId)}`);
+async function loadVideo(videoId, jarId = null) {
+  let url = `/api/state?v=${encodeURIComponent(videoId)}`;
+  if (jarId) url += `&j=${encodeURIComponent(jarId)}`;
+  const response = await fetch(url);
   if (!response.ok) return false;
   const data = await response.json();
   state.videoId = data.id;
@@ -2681,6 +2770,14 @@ async function loadVideo(videoId) {
   state.assets = data.assets;
   state.outputs = data.outputs;
   state.render = data.render;
+  state.jarId = data.jarId || jarId || data.script?.jar || null;
+  state.jar = data.jar || state.jar;
+  state.jarMeta = data.jarMeta || (state.jarId
+    ? state.jarMeta || { id: state.jarId, title: state.jarId, descriptor: "world" }
+    : null);
+  if (state.jarId && !data.jarMeta) {
+    await loadJar(state.jarId, { soft: true });
+  }
   state.detailsDirty = false;
   state.detailsOpen = false;
   state.sceneDetailsOpen = false;
@@ -3287,14 +3384,39 @@ function poll() {
 /* ---------- chrome ---------- */
 
 function breadcrumbs() {
-  const crumbs = [h("a", { class: "crumb", href: "/videos", onClick: (event) => { event.preventDefault(); go("list"); }, text: "Videos" })];
+  const crumbs = [
+    h("a", {
+      class: "crumb",
+      href: "/jars",
+      onClick: (event) => {
+        event.preventDefault();
+        go("jars");
+      },
+      text: "Jars",
+    }),
+  ];
 
-  if (state.page !== "list" && state.script) {
+  if (state.jarMeta && state.page !== "jars") {
     crumbs.push(h("span", { class: "sep", text: "/" }));
     crumbs.push(
       h("a", {
         class: "crumb",
-        href: `/video?v=${encodeURIComponent(state.videoId)}`,
+        href: `/jar?j=${encodeURIComponent(state.jarMeta.id)}`,
+        onClick: (event) => {
+          event.preventDefault();
+          go("jar", { jarId: state.jarMeta.id });
+        },
+        text: state.jarMeta.title,
+      })
+    );
+  }
+
+  if (state.script && (state.page === "video" || state.page === "scene")) {
+    crumbs.push(h("span", { class: "sep", text: "/" }));
+    crumbs.push(
+      h("a", {
+        class: "crumb",
+        href: withJarParam(`/video?v=${encodeURIComponent(state.videoId)}`),
         onClick: (event) => {
           event.preventDefault();
           go("video", { videoId: state.videoId });
@@ -3306,7 +3428,12 @@ function breadcrumbs() {
 
   if (state.page === "scene" && state.script) {
     crumbs.push(h("span", { class: "sep", text: "/" }));
-    crumbs.push(h("span", { class: "crumb current", text: scene().title || `Scene ${state.sceneIndex + 1}` }));
+    crumbs.push(
+      h("span", {
+        class: "crumb current",
+        text: scene().title || `Scene ${state.sceneIndex + 1}`,
+      })
+    );
   }
 
   return h("nav", { class: "breadcrumbs" }, crumbs);
@@ -3587,7 +3714,7 @@ function render() {
   const savedScroll = captureScroll();
 
   scrubber = null;
-  if (state.page !== "list" && state.page !== "landing") {
+  if (state.page !== "jars" && state.page !== "jar" && state.page !== "landing") {
     ensureScript();
     syncSource();
   }
@@ -3602,11 +3729,13 @@ function render() {
   const view =
     state.page === "landing"
       ? landingView()
-      : state.page === "list"
-        ? listView()
-        : state.page === "scene"
-          ? sceneView()
-          : videoView();
+      : state.page === "jars"
+        ? jarsView()
+        : state.page === "jar"
+          ? jarView()
+          : state.page === "scene"
+            ? sceneView()
+            : videoView();
   const panel = processPanelView();
   app.replaceChildren(...[view, panel].filter(Boolean));
 
@@ -3656,9 +3785,22 @@ function landingView() {
 
   return h(
     "section",
-    { class: "landing", "aria-label": "Cozy Journeys" },
+    { class: "landing", "aria-label": copy.brand },
     h("div", { class: "landing-bg", "aria-hidden": "true" }, video),
     h("div", { class: "landing-veil", "aria-hidden": "true" }),
+    h("div", { class: "landing-vignette", "aria-hidden": "true" }),
+    h(
+      "a",
+      {
+        class: "landing-brand",
+        href: "/",
+        onClick: (event) => {
+          event.preventDefault();
+          go("landing");
+        },
+        text: copy.brand,
+      }
+    ),
     h(
       "div",
       { class: "landing-copy" },
@@ -3667,22 +3809,59 @@ function landingView() {
         ? h("p", { class: "landing-desc", text: copy.description })
         : null,
       h(
-        "a",
-        {
-          class: "landing-cta",
-          href: copy.href,
-          onClick: (event) => {
-            event.preventDefault();
-            go("video", { videoId: copy.videoId });
-          },
-          text: copy.cta,
-        }
+        "div",
+        { class: "landing-actions" },
+        h(
+          "a",
+          {
+            class: "landing-cta",
+            href: copy.href,
+            onClick: (event) => {
+              event.preventDefault();
+              go("video", { videoId: copy.videoId });
+            },
+            text: copy.cta,
+          }
+        ),
+        copy.secondary
+          ? h(
+              "a",
+              {
+                class: "landing-secondary",
+                href: copy.secondaryHref,
+                onClick: (event) => {
+                  event.preventDefault();
+                  go("jars");
+                },
+                text: copy.secondary,
+              }
+            )
+          : null
       )
+    ),
+    h(
+      "div",
+      { class: "landing-scroll", "aria-hidden": "true" },
+      h("span", { class: "landing-scroll-mark" })
     )
   );
 }
 
-function listView() {
+function mediaThumbStyle(path) {
+  if (!path) return {};
+  // Posters under assets/videos are served directly; images go through /thumb.
+  if (/\.(mp4|mov|webm|mkv)$/i.test(path)) {
+    return {};
+  }
+  if (path.startsWith("assets/videos/")) {
+    return { backgroundImage: `url(/${path})` };
+  }
+  return {
+    backgroundImage: `url(/thumb?path=${encodeURIComponent(path)}&w=240)`,
+  };
+}
+
+function jarsView() {
   return h(
     "div",
     { class: "shell-inner" },
@@ -3690,8 +3869,132 @@ function listView() {
     h(
       "div",
       { class: "video-page" },
-      h("h1", { class: "page-title", text: "Videos" }),
-      h("p", { class: "page-blurb", text: "Pick a video to arrange its scenes." }),
+      h("h1", { class: "page-title", text: "Jars" }),
+      h("p", {
+        class: "page-blurb",
+        text: "Worlds you can build in — each jar holds videos, scenes, and shared rules.",
+      }),
+      h(
+        "div",
+        { class: "video-list" },
+        state.jars.length
+          ? state.jars.map((jar) =>
+              h(
+                "button",
+                {
+                  class: "video-row",
+                  type: "button",
+                  onClick: () => go("jar", { jarId: jar.id }),
+                },
+                h("div", {
+                  class: `video-thumb${jar.thumb ? "" : " blank"}`,
+                  style: mediaThumbStyle(jar.thumb),
+                }),
+                h(
+                  "div",
+                  { class: "video-meta" },
+                  h(
+                    "div",
+                    { class: "jar-title-row" },
+                    h("span", { class: "name", text: jar.title }),
+                    h("span", {
+                      class: "jar-descriptor",
+                      text: jar.descriptor || "world",
+                    })
+                  ),
+                  h("span", {
+                    class: "len",
+                    text:
+                      (jar.summary
+                        ? jar.summary
+                        : `${jar.videos} video${jar.videos === 1 ? "" : "s"}`) +
+                      (jar.summary
+                        ? ` · ${jar.videos} video${jar.videos === 1 ? "" : "s"}`
+                        : ""),
+                  })
+                )
+              )
+            )
+          : h("p", {
+              class: "empty-note",
+              text: "No jars yet — add a JSON file to jars/",
+            })
+      )
+    )
+  );
+}
+
+function jarView() {
+  const jar = state.jar || {};
+  const title = state.jarMeta?.title || state.jarId || "Jar";
+  const descriptor = state.jarMeta?.descriptor || jar.descriptor || "world";
+  return h(
+    "div",
+    { class: "shell-inner" },
+    topbar(),
+    h(
+      "div",
+      { class: "video-page jar-page" },
+      h(
+        "div",
+        { class: "page-title-row" },
+        h("h1", { class: "page-title", text: title }),
+        h("span", { class: "jar-descriptor is-large", text: descriptor })
+      ),
+      jar.summary
+        ? h("p", { class: "page-blurb", text: jar.summary })
+        : h("p", {
+            class: "page-blurb",
+            text: "Videos in this world. Rules and prompts below apply across them.",
+          }),
+      jar.hero
+        ? h(
+            "div",
+            { class: "jar-hero" },
+            h("video", {
+              class: "jar-hero-video",
+              src: jar.hero.startsWith("/") ? jar.hero : `/${jar.hero}`,
+              poster: jar.thumb
+                ? jar.thumb.startsWith("/")
+                  ? jar.thumb
+                  : `/${jar.thumb}`
+                : "",
+              autoplay: true,
+              muted: true,
+              loop: true,
+              playsinline: true,
+              onLoadedData: (event) => {
+                const el = event.currentTarget;
+                if (!el) return;
+                el.muted = true;
+                el.play().catch(() => {});
+              },
+            })
+          )
+        : null,
+      h(
+        "div",
+        { class: "jar-panels" },
+        h(
+          "section",
+          { class: "jar-panel" },
+          h("h2", { class: "jar-panel-title", text: "Rules" }),
+          h("p", {
+            class: "jar-panel-body",
+            text: jar.rules || "No rules set for this world yet.",
+          })
+        ),
+        h(
+          "section",
+          { class: "jar-panel" },
+          h("h2", { class: "jar-panel-title", text: "Global prompt" }),
+          h("p", {
+            class: "jar-panel-body",
+            text: jar.prompt || "No global prompt yet.",
+          })
+        )
+      ),
+      h("h2", { class: "jar-section-title", text: "Videos" }),
       h(
         "div",
         { class: "video-list" },
@@ -3702,13 +4005,12 @@ function listView() {
                 {
                   class: "video-row",
                   type: "button",
-                  onClick: () => go("video", { videoId: video.id }),
+                  onClick: () =>
+                    go("video", { videoId: video.id, jarId: state.jarId }),
                 },
                 h("div", {
                   class: `video-thumb${video.thumb ? "" : " blank"}`,
-                  style: video.thumb
-                    ? { backgroundImage: `url(/thumb?path=${encodeURIComponent(video.thumb)}&w=240)` }
-                    : {},
+                  style: mediaThumbStyle(video.thumb),
                 }),
                 h(
                   "div",
@@ -3722,7 +4024,10 @@ function listView() {
                 videoOutputSummary(video)
               )
             )
-          : h("p", { class: "empty-note", text: "No videos yet — add a JSON file to videos/" })
+          : h("p", {
+              class: "empty-note",
+              text: "No videos in this jar yet — add ids to jars/<id>.json → videos.",
+            })
       )
     )
   );
@@ -7855,12 +8160,16 @@ window.addEventListener("keydown", (event) => {
       return;
     }
     if (state.page === "scene") go("video", { videoId: state.videoId });
-    else if (state.page === "video") go("list");
+    else if (state.page === "video") {
+      if (state.jarId) go("jar", { jarId: state.jarId });
+      else go("jars");
+    } else if (state.page === "jar") go("jars");
   }
   if (
     event.code === "Space" &&
     !event.target.closest("input, textarea, button, a") &&
-    state.page !== "list" &&
+    state.page !== "jars" &&
+    state.page !== "jar" &&
     state.page !== "landing"
   ) {
     event.preventDefault();
