@@ -158,6 +158,14 @@ button {
   border-color: #d14646;
 }
 
+.render-eta {
+  flex: 0 0 auto;
+  min-width: 5.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
 .btn:disabled {
   opacity: 0.45;
   cursor: default;
@@ -612,14 +620,16 @@ button {
   background: #e7f5f2;
 }
 
-.ready-tag.is-stale {
-  color: #9a6700;
-  background: #fff6e0;
+.btn.icon-btn {
+  width: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.ready-tag.is-partial {
-  color: var(--link);
-  background: var(--accent-soft);
+.btn.icon-btn:disabled {
+  opacity: 0.35;
 }
 
 .page-title-row {
@@ -658,6 +668,17 @@ button {
 .scene-meta-top .ready-tag {
   padding: 1px 6px;
   font-size: 10px;
+}
+
+.scene-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(35, 131, 226, 0.12);
+  color: var(--link);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .page-blurb {
@@ -1206,7 +1227,202 @@ button {
   margin-top: 4px;
 }
 
+.transition-pool {
+  margin-top: 20px;
+  padding: 12px 14px 14px;
+  border-radius: 8px;
+  background: #e8e7e4;
+  border: 1px solid var(--line-strong);
+}
+
+.transition-pool > .sequence-head {
+  margin: 0 0 4px;
+}
+
+.transition-strip {
+  min-height: 0;
+  padding-bottom: 4px;
+  align-items: center;
+}
+
+.transition-add {
+  flex: none;
+  align-self: center;
+  margin-left: 4px;
+}
+
+.scene-card.selected {
+  outline: 2px solid #c4554d;
+  outline-offset: 1px;
+  background: rgba(196, 85, 77, 0.08);
+}
+
+.scene-card.is-transition {
+  position: relative;
+}
+
+.transition-use-btn {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  min-width: 44px;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 4px;
+  background: #c4554d;
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.transition-use-btn:hover {
+  background: #a9443e;
+}
+
+.transition-use-btn.is-on {
+  background: #37352f;
+}
+
+.transition-gap-spacer {
+  flex: none;
+  width: 10px;
+}
+
+.transition-markers {
+  flex: none;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 28px;
+  margin: 0 2px;
+}
+
+.transition-dot-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+}
+
+.transition-dot {
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: #c4554d;
+  cursor: pointer;
+  box-shadow: 0 0 0 2px rgba(196, 85, 77, 0.25);
+}
+
+.transition-dot:hover,
+.transition-dot:focus-visible {
+  transform: scale(1.15);
+  outline: none;
+}
+
+.transition-dot-x {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 18px;
+  height: 18px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: #fff;
+  color: #9b2c2c;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(55, 53, 47, 0.16);
+}
+
+.transition-dot-wrap:hover .transition-dot-x,
+.transition-dot-wrap:focus-within .transition-dot-x {
+  display: flex;
+}
+
+.transition-dot-x:hover {
+  background: #fdecea;
+}
+
+.transition-drop {
+  flex: none;
+  align-self: stretch;
+  width: 28px;
+  margin: 4px 6px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: rgba(196, 85, 77, 0.14);
+  cursor: pointer;
+  position: relative;
+}
+
+.transition-drop::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 52px;
+  left: 50%;
+  width: 3px;
+  margin-left: -1.5px;
+  border-radius: 2px;
+  background: #c4554d;
+  opacity: 0.85;
+}
+
+.transition-drop:hover,
+.transition-drop:focus-visible {
+  background: rgba(196, 85, 77, 0.28);
+  outline: none;
+}
+
+.scene-strip.is-placing-transition .scene-card:not(.selected) {
+  opacity: 0.72;
+}
+
+.transition-fx-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+}
+
+.transition-fx-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.transition-fx-select {
+  min-width: 120px;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--canvas);
+  color: var(--ink);
+  font: inherit;
+}
+
 .scene-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   margin: 0 0 16px;
 }
 
@@ -1214,6 +1430,84 @@ button {
   flex: 1;
   min-width: 0;
   margin: 0;
+}
+
+.scene-transition-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+
+.scene-transition-toggle.on {
+  border-color: rgba(35, 131, 226, 0.35);
+  background: rgba(35, 131, 226, 0.08);
+  color: var(--link);
+}
+
+.scene-transition-toggle input {
+  margin: 0;
+}
+
+.transition-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.transition-note {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.transition-bridge-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.transition-bridge-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  font-size: 13px;
+  border-top: 1px solid var(--line);
+}
+
+.transition-bridge-list li:first-child {
+  border-top: none;
+}
+
+.transition-map-hold {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  font-size: 13px;
+}
+
+.transition-map-hold input {
+  width: 88px;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--canvas);
+  color: var(--ink);
+  font: inherit;
 }
 
 .scene-title {
@@ -1468,6 +1762,28 @@ button {
 
 .picture-still {
   background: center/cover no-repeat;
+}
+
+.picture-motion {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.picture-motion .anim-layer {
+  pointer-events: none;
+  z-index: 2;
+}
+
+.picture-map-overlay {
+  z-index: 5;
+  pointer-events: none;
+  transition: opacity 80ms linear;
+}
+
+.picture-map-overlay.is-hidden {
+  visibility: hidden;
 }
 
 .picture-fx-wrap {

@@ -44,6 +44,9 @@ class BuildError(Exception):
     pass
 
 
+XFADE_STYLES = {"fade"}
+
+
 @dataclass
 class Segment:
     """One still image occupying a stretch of the timeline."""
@@ -55,8 +58,19 @@ class Segment:
     zoom: float = 1.0
     start: float = 0.0
     fade_in: float | None = None  # overrides the default cross-fade entering this still
+    enter_style: str = "fade"  # ffmpeg xfade name when transitioning into this still
     effects: list[dict] = field(default_factory=list)
     animations: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class Track:
+    """One song (or borrowed slice) in a scene mix."""
+
+    path: Path
+    duration: float  # how long it plays in the mix
+    name: str
+    offset: float = 0.0  # start time inside the source file
 
 
 @dataclass
@@ -65,20 +79,26 @@ class Scene:
     title: str
     location: str
     segments: list[Segment] = field(default_factory=list)
-    tracks: list[tuple[Path, float, str]] = field(default_factory=list)
+    tracks: list[Track] = field(default_factory=list)
     sounds: list[tuple[Path, float]] = field(default_factory=list)  # (path, volume 0–1)
     effects: list[dict] = field(default_factory=list)
     animations: list[dict] = field(default_factory=list)
     audio_duration: float = 0.0
     start: float = 0.0
     track_crossfade: float = 0.0
+    is_transition: bool = False
+    transition_in: str = "fade"
+    transition_out: str = "fade"
+    # Silent map overlays on top of this scene's picture (times relative to scene start).
+    # {image: Path, start: float, duration: float, fade_in: float, fade_out: float}
+    bridge_overlays: list[dict] = field(default_factory=list)
 
     def track_starts(self) -> list[tuple[float, float, str]]:
         cursor = self.start
         marks = []
-        for _, duration, name in self.tracks:
-            marks.append((cursor, duration, name))
-            cursor += duration - self.track_crossfade
+        for track in self.tracks:
+            marks.append((cursor, track.duration, track.name))
+            cursor += track.duration - self.track_crossfade
         return marks
 
 
@@ -125,35 +145,156 @@ def project_root(manifest_path: Path) -> Path:
     return manifest_path.parent
 
 
+def _parse_scene_tracks(root: Path, raw: dict) -> list[Track]:
+    tracks: list[Track] = []
+    for entry in raw.get("tracks", []) or []:
+        source = entry["file"] if isinstance(entry, dict) else entry
+        path = resolve(root, source, "song")
+        name = entry.get("title", path.stem) if isinstance(entry, dict) else path.stem
+        tracks.append(Track(path=path, duration=probe_duration(path), name=name, offset=0.0))
+    return tracks
+
+
+@dataclass
+class MapBridge:
+    """Visual map overlay that straddles two scenes — no owned audio or runtime."""
+
+    map_image: Path
+    seconds: float
+    style_in: str
+    style_out: str
+    title: str
+
+
+def _pair_crossfade(left: Track, right: Track, track_crossfade: float) -> float:
+    if track_crossfade <= 0:
+        return 0.0
+    fade = min(track_crossfade, left.duration * 0.45, right.duration * 0.45)
+    return max(fade, 0.05)
+
+
+def _scene_audio_duration(tracks: list[Track], track_crossfade: float) -> float:
+    if not tracks:
+        return 0.0
+    total = sum(track.duration for track in tracks)
+    for index in range(1, len(tracks)):
+        total -= _pair_crossfade(tracks[index - 1], tracks[index], track_crossfade)
+    return max(total, 0.0)
+
+
 def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
     with manifest_path.open() as handle:
         script = json.load(handle)
 
     root = project_root(manifest_path)
     defaults = script.get("defaults", {})
-    map_seconds = float(defaults.get("map_seconds", 60))
+    map_seconds = float(defaults.get("map_seconds", 30))
     track_crossfade = float(defaults.get("track_crossfade", 2))
     default_zoom = float(defaults.get("zoom", 1.12))
+    fade_seconds = float(defaults.get("fade_seconds", 3))
     shared_map = script.get("map")
+    raw_scenes = script.get("scenes", []) or []
+
+    def xfade_style(value: str | None) -> str:
+        name = (value or "fade").strip().lower()
+        return name if name in XFADE_STYLES else "fade"
+
+    # Pass 1: tracks for normal scenes; map bridges for transitions (no owned runtime).
+    owned_tracks: list[list[Track] | None] = []
+    flags: list[bool] = []
+    bridges_after: dict[int, MapBridge] = {}  # keyed by previous scene 0-based index
+
+    for index, raw in enumerate(raw_scenes, start=1):
+        is_transition = bool(raw.get("is_transition"))
+        flags.append(is_transition)
+        if not is_transition:
+            owned_tracks.append(_parse_scene_tracks(root, raw))
+            continue
+
+        owned_tracks.append(None)
+        title = raw.get("title", f"Scene {index}")
+        if index == 1 or index == len(raw_scenes):
+            raise BuildError(
+                f"scene {index} ({title}) is a transition and must sit between two scenes"
+            )
+        if flags[index - 2] or bool(raw_scenes[index].get("is_transition")):
+            raise BuildError(
+                f"scene {index} ({title}) is a transition and cannot sit next to another transition"
+            )
+
+        map_config = raw.get("map", {})
+        if isinstance(map_config, str):
+            map_config = {"image": map_config}
+        if map_config is None:
+            map_config = {"seconds": 0}
+        hold = float(map_config.get("seconds", map_seconds))
+        map_source = map_config.get("image") or shared_map or raw.get("image")
+        if hold > 0 and not map_source:
+            raise BuildError(
+                f"scene {index} ({title}) is a transition and needs a map image"
+            )
+        if hold > 0:
+            bridges_after[index - 2] = MapBridge(
+                map_image=resolve(root, map_source, "map image"),
+                seconds=hold,
+                style_in=xfade_style(raw.get("transition_in")),
+                style_out=xfade_style(raw.get("transition_out")),
+                title=title,
+            )
 
     scenes: list[Scene] = []
     clock = 0.0
 
-    for index, raw in enumerate(script.get("scenes", []), start=1):
+    for index, raw in enumerate(raw_scenes, start=1):
         title = raw.get("title", f"Scene {index}")
+        is_transition = flags[index - 1]
+        style_in = xfade_style(raw.get("transition_in"))
+        style_out = xfade_style(raw.get("transition_out"))
 
-        tracks: list[tuple[Path, float, str]] = []
-        for entry in raw.get("tracks", []):
-            source = entry["file"] if isinstance(entry, dict) else entry
-            path = resolve(root, source, "song")
-            name = entry.get("title", path.stem) if isinstance(entry, dict) else path.stem
-            tracks.append((path, probe_duration(path), name))
-        if not tracks:
-            raise BuildError(f"scene {index} ({title}) has no tracks")
+        if is_transition:
+            # Marker only — runtime lives on the neighboring scenes as a map overlay.
+            scenes.append(
+                Scene(
+                    index=index,
+                    title=title,
+                    location=raw.get("location", ""),
+                    segments=[],
+                    tracks=[],
+                    sounds=[],
+                    effects=[],
+                    animations=[],
+                    audio_duration=0.0,
+                    start=clock,
+                    track_crossfade=track_crossfade,
+                    is_transition=True,
+                    transition_in=style_in,
+                    transition_out=style_out,
+                )
+            )
+            continue
 
-        # Songs overlap slightly, so the scene is shorter than the raw sum.
-        audio_duration = sum(d for _, d, _ in tracks)
-        audio_duration -= track_crossfade * (len(tracks) - 1)
+        tracks = owned_tracks[index - 1] or []
+        audio_duration = _scene_audio_duration(tracks, track_crossfade)
+        if audio_duration <= 0:
+            scenes.append(
+                Scene(
+                    index=index,
+                    title=title,
+                    location=raw.get("location", ""),
+                    segments=[],
+                    tracks=[],
+                    sounds=[],
+                    effects=[],
+                    animations=[],
+                    audio_duration=0.0,
+                    start=clock,
+                    track_crossfade=track_crossfade,
+                    is_transition=False,
+                    transition_in=style_in,
+                    transition_out=style_out,
+                )
+            )
+            continue
 
         sounds: list[tuple[Path, float]] = []
         for entry in raw.get("sounds", []) or []:
@@ -161,7 +302,6 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             path = resolve(root, source, "sound")
             raw_volume = 55 if not isinstance(entry, dict) else entry.get("volume", 55)
             try:
-                # Slider is presence under music — boost so beds read through songs.
                 volume = max(0.0, min(float(raw_volume) / 100.0 * 2.2, 2.5))
             except (TypeError, ValueError):
                 volume = 1.2
@@ -172,8 +312,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             map_config = {"image": map_config}
         if map_config is None:
             map_config = {"seconds": 0}
-        # A zero-second hold means this scene opens straight on its picture.
-        map_hold = float(map_config.get("seconds", map_seconds))
+        own_map_hold = float(map_config.get("seconds", map_seconds))
 
         images = raw.get("images") or ([raw["image"]] if raw.get("image") else [])
         if not images:
@@ -208,7 +347,6 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                 aspect = "native"
             loop_in = entry.get("loop_in")
             loop_out = entry.get("loop_out")
-            # 0 means unset (use the full clip), not a hard zero out-point.
             in_at = None if loop_in is None else float(loop_in)
             out_at = None if loop_out is None else float(loop_out)
             if in_at is not None and in_at <= 0:
@@ -231,13 +369,32 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                 }
             )
 
-        # The map eats into the scene's music rather than being extra time.
-        map_hold = min(map_hold, audio_duration * 0.5)
-        picture_hold = (audio_duration - map_hold) / len(images)
+        # bridges_after is keyed by the scene before the transition (0-based).
+        outgoing = bridges_after.get(index - 1)
+        incoming = (
+            bridges_after.get(index - 3)
+            if index >= 3 and flags[index - 2]
+            else None
+        )
+        own_map_hold = min(max(0.0, own_map_hold), audio_duration * 0.5)
 
-        segments = []
-        if map_hold > 0:
+        in_hold = min(max(0.0, incoming.seconds / 2.0), audio_duration * 0.45) if incoming else 0.0
+        out_hold = min(max(0.0, outgoing.seconds / 2.0), audio_duration * 0.45) if outgoing else 0.0
+        # Map overlays sit on top — they do not steal picture time or audio.
+        if in_hold + out_hold > audio_duration and (in_hold + out_hold) > 0:
+            scale = audio_duration / (in_hold + out_hold)
+            in_hold *= scale
+            out_hold *= scale
+
+        remaining = max(audio_duration - own_map_hold, 0.0)
+        picture_hold = (remaining / len(images)) if images and remaining > 0.001 else 0.0
+
+        segments: list[Segment] = []
+        if own_map_hold > 0.001:
             map_source = map_config.get("image", shared_map)
+            if not map_source and images:
+                first = images[0]
+                map_source = first["file"] if isinstance(first, dict) else first
             if not map_source:
                 raise BuildError(
                     f"scene {index} ({title}) has no map image and no top-level \"map\" is set"
@@ -245,29 +402,60 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             segments.append(
                 Segment(
                     image=resolve(root, map_source, "map image"),
-                    hold=map_hold,
+                    hold=own_map_hold,
                     label=f"{title} (map)",
                     pan=map_config.get("pan", "none"),
                     zoom=float(map_config.get("zoom", 1.0)),
                     fade_in=optional_float(map_config.get("fade_in")),
+                    enter_style="fade",
                     effects=effects,
                     animations=animations,
                 )
             )
-        for position, entry in enumerate(images):
-            source = entry["file"] if isinstance(entry, dict) else entry
-            options = entry if isinstance(entry, dict) else {}
-            segments.append(
-                Segment(
-                    image=resolve(root, source, "scene image"),
-                    hold=picture_hold,
-                    label=title if len(images) == 1 else f"{title} ({position + 1})",
-                    pan=options.get("pan", raw.get("pan", "right" if index % 2 else "left")),
-                    zoom=float(options.get("zoom", raw.get("zoom", default_zoom))),
-                    fade_in=optional_float(options.get("fade_in")),
-                    effects=effects,
-                    animations=animations,
+
+        if picture_hold > 0.001:
+            for position, entry in enumerate(images):
+                source = entry["file"] if isinstance(entry, dict) else entry
+                options = entry if isinstance(entry, dict) else {}
+                segments.append(
+                    Segment(
+                        image=resolve(root, source, "scene image"),
+                        hold=picture_hold,
+                        label=title if len(images) == 1 else f"{title} ({position + 1})",
+                        pan=options.get("pan", raw.get("pan", "right" if index % 2 else "left")),
+                        zoom=float(options.get("zoom", raw.get("zoom", default_zoom))),
+                        fade_in=optional_float(options.get("fade_in")),
+                        enter_style="fade",
+                        effects=effects,
+                        animations=animations,
+                    )
                 )
+
+        if not segments:
+            raise BuildError(f"scene {index} ({title}) has no video segments")
+
+        bridge_overlays: list[dict] = []
+        if in_hold > 0.001 and incoming:
+            bridge_overlays.append(
+                {
+                    "image": incoming.map_image,
+                    "start": 0.0,
+                    "duration": in_hold,
+                    "fade_in": 0.0,
+                    "fade_out": fade_seconds,
+                    "label": incoming.title,
+                }
+            )
+        if out_hold > 0.001 and outgoing:
+            bridge_overlays.append(
+                {
+                    "image": outgoing.map_image,
+                    "start": max(0.0, audio_duration - out_hold),
+                    "duration": out_hold,
+                    "fade_in": fade_seconds,
+                    "fade_out": 0.0,
+                    "label": outgoing.title,
+                }
             )
 
         scene = Scene(
@@ -282,6 +470,10 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             audio_duration=audio_duration,
             start=clock,
             track_crossfade=track_crossfade,
+            is_transition=False,
+            transition_in=style_in,
+            transition_out=style_out,
+            bridge_overlays=bridge_overlays,
         )
         cursor = clock
         for segment in scene.segments:
@@ -515,6 +707,27 @@ def overlay_png_for(event: dict, height: int) -> Path:
     return path
 
 
+def collect_bridge_overlays(scenes: list[Scene]) -> list[dict]:
+    """Fullscreen silent map overlays — times absolute on the video timeline."""
+    events = []
+    for scene in scenes:
+        for overlay in scene.bridge_overlays or []:
+            duration = float(overlay.get("duration") or 0)
+            if duration <= 0.001:
+                continue
+            events.append(
+                {
+                    "image": overlay["image"],
+                    "start": scene.start + float(overlay.get("start") or 0),
+                    "duration": duration,
+                    "fade_in": max(0.0, float(overlay.get("fade_in") or 0)),
+                    "fade_out": max(0.0, float(overlay.get("fade_out") or 0)),
+                    "label": overlay.get("label") or "map",
+                }
+            )
+    return events
+
+
 def collect_overlay_events(scenes: list[Scene], overlays: dict | None) -> list[dict]:
     overlays = overlays or {}
     events: list[dict] = []
@@ -619,9 +832,22 @@ def build_command(
                 ]
         audio_offset = len(segments) + len(effect_inputs) + len(anim_inputs)
 
+    bridge_events: list[dict] = []
+    bridge_base = audio_offset
     overlay_inputs: list[tuple[dict, Path]] = []
     overlay_base = audio_offset
     if not audio_only:
+        bridge_events = collect_bridge_overlays(scenes)
+        for event in bridge_events:
+            hold = max(float(event["duration"]), 0.1)
+            cmd += [
+                "-loop", "1",
+                "-framerate", str(fps),
+                "-t", f"{hold:.3f}",
+                "-i", str(event["image"]),
+            ]
+        bridge_base = audio_offset
+        overlay_base = bridge_base + len(bridge_events)
         for event in collect_overlay_events(scenes, overlays):
             png = overlay_png_for(event, height)
             overlay_inputs.append((event, png))
@@ -632,12 +858,11 @@ def build_command(
                 "-t", f"{hold:.3f}",
                 "-i", str(png),
             ]
-        overlay_base = audio_offset
         audio_offset = overlay_base + len(overlay_inputs)
 
     for scene in scenes:
-        for path, _, _ in scene.tracks:
-            cmd += ["-i", str(path)]
+        for track in scene.tracks:
+            cmd += ["-i", str(track.path)]
         for path, _volume in scene.sounds:
             # Loop ambient beds to cover the whole scene.
             cmd += [
@@ -750,8 +975,11 @@ def build_command(
                 # Each transition starts on the boundary between two holds.
                 offset += segments[position - 1].hold
                 label = f"[x{position}]"
+                style = segments[position].enter_style or "fade"
+                if style not in XFADE_STYLES:
+                    style = "fade"
                 graph.append(
-                    f"{current}[v{position}]xfade=transition=fade"
+                    f"{current}[v{position}]xfade=transition={style}"
                     f":duration={fade_out[position - 1]:.3f}:offset={offset:.3f}{label}"
                 )
                 current = label
@@ -764,6 +992,36 @@ def build_command(
         )
 
         current = "vbase"
+        # Silent map bridges — visual only, scene audio continues underneath.
+        for step, event in enumerate(bridge_events):
+            input_index = bridge_base + step
+            start = max(0.0, float(event["start"]))
+            duration = float(event["duration"])
+            fade_in = min(float(event["fade_in"]), max(0.0, duration * 0.45))
+            fade_out = min(float(event["fade_out"]), max(0.0, duration * 0.45))
+            if fade_in + fade_out > duration:
+                fade_out = max(0.0, duration - fade_in)
+            parts = [
+                f"[{input_index}:v]fps={fps}",
+                f"scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos",
+                f"crop={width}:{height}",
+                "setsar=1",
+                "format=rgba",
+            ]
+            if fade_in > 0.01:
+                parts.append(f"fade=t=in:st=0:d={fade_in:.3f}:alpha=1")
+            if fade_out > 0.01:
+                out_at = max(0.0, duration - fade_out)
+                parts.append(f"fade=t=out:st={out_at:.3f}:d={fade_out:.3f}:alpha=1")
+            parts.append(f"setpts=PTS-STARTPTS+{start:.3f}/TB")
+            ov = f"map{step}"
+            out = f"vm{step}"
+            graph.append(",".join(parts) + f"[{ov}]")
+            graph.append(
+                f"[{current}][{ov}]overlay=0:0:eof_action=pass:format=auto[{out}]"
+            )
+            current = out
+
         for step, (event, _png) in enumerate(overlay_inputs):
             input_index = overlay_base + step
             start = max(0.0, float(event["start"]))
@@ -792,23 +1050,31 @@ def build_command(
     scene_labels: list[str] = []
     for scene in scenes:
         track_labels = []
-        for _ in scene.tracks:
+        for track in scene.tracks:
             label = f"a{index}"
+            # Trim borrowed slices (and any future offset) before the scene mix.
+            trim = ""
+            if track.offset > 0.001 or track.duration > 0:
+                trim = f"atrim=start={track.offset:.3f}:duration={track.duration:.3f},asetpts=PTS-STARTPTS,"
             graph.append(
-                f"[{index}:a]aresample=48000,"
+                f"[{index}:a]{trim}aresample=48000,"
                 f"aformat=sample_fmts=fltp:channel_layouts=stereo[{label}]"
             )
             track_labels.append(label)
             index += 1
 
+        if not track_labels:
+            # Skip incomplete scenes (no songs) so one empty card doesn't break the mix.
+            continue
         if len(track_labels) == 1:
             merged = track_labels[0]
         elif track_crossfade > 0:
             merged = track_labels[0]
             for step, label in enumerate(track_labels[1:], start=1):
                 out = f"s{scene.index}m{step}"
+                fade = _pair_crossfade(scene.tracks[step - 1], scene.tracks[step], track_crossfade)
                 graph.append(
-                    f"[{merged}][{label}]acrossfade=d={track_crossfade:.3f}:c1=tri:c2=tri[{out}]"
+                    f"[{merged}][{label}]acrossfade=d={fade:.3f}:c1=tri:c2=tri[{out}]"
                 )
                 merged = out
         else:
@@ -835,8 +1101,18 @@ def build_command(
             )
             merged = mixed
 
-        scene_labels.append(merged)
+        # Exact scene length so the next scene's songs start on the cut
+        # (mid-map), not drifted from acrossfade/amix rounding.
+        exact = f"s{scene.index}len"
+        graph.append(
+            f"[{merged}]atrim=duration={scene.audio_duration:.3f},"
+            f"apad=whole_dur={scene.audio_duration:.3f},"
+            f"asetpts=PTS-STARTPTS[{exact}]"
+        )
+        scene_labels.append(exact)
 
+    if not scene_labels:
+        raise BuildError("nothing to mix — add songs to at least one scene")
     if len(scene_labels) == 1:
         audio_out = scene_labels[0]
     else:
@@ -901,6 +1177,14 @@ def print_timeline(scenes: list[Scene], total: float) -> None:
                 f"    {timecode(segment.start)}  {segment.label:<34}"
                 f"{segment.hold / 60:5.1f} min  pan:{segment.pan} zoom:{segment.zoom:g}"
             )
+        for overlay in scene.bridge_overlays or []:
+            start = scene.start + float(overlay.get("start") or 0)
+            hold = float(overlay.get("duration") or 0)
+            label = f"{overlay.get('label') or 'map'} (overlay)"
+            print(
+                f"    {timecode(start)}  {label:<34}"
+                f"{hold / 60:5.1f} min  silent map on top"
+            )
         for start, duration, name in scene.track_starts():
             print(f"    {timecode(start)}  ♪ {name} ({duration / 60:.1f} min)")
     print(f"\nTotal runtime: {timecode(total)} ({total / 60:.1f} min)\n")
@@ -944,12 +1228,25 @@ def main() -> int:
         if not chosen:
             print(f"error: there is no scene {args.scene}", file=sys.stderr)
             return 1
+        if chosen[0].is_transition:
+            print(
+                f"error: scene {args.scene} ({chosen[0].title}) is a transition — "
+                "it overlays neighboring scenes. Process those scenes or the full video.",
+                file=sys.stderr,
+            )
+            return 1
         scenes = chosen
         total = scenes[0].audio_duration
         offset = scenes[0].start
         scenes[0].start = 0.0
         for segment in scenes[0].segments:
             segment.start -= offset
+        if total <= 0:
+            print(
+                f"error: scene {args.scene} ({scenes[0].title}) has no songs yet",
+                file=sys.stderr,
+            )
+            return 1
 
     output_config = script.get("output", {})
     defaults = script.get("defaults", {})

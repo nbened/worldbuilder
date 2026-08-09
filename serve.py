@@ -217,9 +217,16 @@ class Render:
     def snapshot(self) -> dict:
         with self.lock:
             path = self.path
+            percent = round(100 * self.done / self.total) if self.total else 0
+            # Keep the UI under 100% until ffmpeg actually exits — the last
+            # stretch is often muxing after out_time has already hit the total.
+            if self.status == "running":
+                percent = min(max(percent, 0), 99)
+            elif self.status == "done":
+                percent = 100
             state = {
                 "status": self.status,
-                "percent": round(100 * self.done / self.total) if self.total else 0,
+                "percent": percent,
                 "message": self.message,
                 "scene": self.scene,
                 "video": self.video_id,
@@ -332,24 +339,48 @@ render = Render()
 _audio_lock = threading.Lock()
 
 
+def _track_file(entry) -> str:
+    return entry if isinstance(entry, str) else entry.get("file", "")
+
+
+def _scene_can_preview_audio(scenes: list, index: int) -> bool:
+    scene = scenes[index]
+    # Transitions are visual overlays — they have no playlist of their own.
+    if scene.get("is_transition"):
+        return False
+    return bool(scene.get("tracks"))
+
+
 def mixed_audio(script_path: Path, scene_index: int | None = None) -> Path | None:
     script = load_script(script_path)
-    scene_list = script.get("scenes", [])
+    all_scenes = script.get("scenes", [])
     if scene_index is not None:
-        if scene_index < 0 or scene_index >= len(scene_list):
+        if scene_index < 0 or scene_index >= len(all_scenes):
             return None
-        scene_list = [scene_list[scene_index]]
+        if not _scene_can_preview_audio(all_scenes, scene_index):
+            return None
+        scene_list = [all_scenes[scene_index]]
+    else:
+        scene_list = [scene for scene in all_scenes if not scene.get("is_transition")]
+        if not any(_scene_can_preview_audio(all_scenes, i) for i in range(len(all_scenes))):
+            return None
 
     tracks = [
-        entry if isinstance(entry, str) else entry.get("file", "")
+        _track_file(entry)
         for scene in scene_list
-        for entry in scene.get("tracks", [])
+        for entry in scene.get("tracks", []) or []
+        if _track_file(entry)
     ]
     if not tracks:
         return None
 
     sounds = []
-    for scene in scene_list:
+    preview_scenes = (
+        [all_scenes[scene_index]]
+        if scene_index is not None
+        else all_scenes
+    )
+    for scene in preview_scenes:
         for entry in scene.get("sounds", []) or []:
             path = entry if isinstance(entry, str) else entry.get("file", "")
             volume = 55 if isinstance(entry, str) else entry.get("volume", 55)
@@ -363,6 +394,7 @@ def mixed_audio(script_path: Path, scene_index: int | None = None) -> Path | Non
         str(defaults.get("track_crossfade", 2)),
         str(defaults.get("open_close_fade", 2)),
         f"sounds:{','.join(sounds)}",
+        f"transitions:{','.join('1' if s.get('is_transition') else '0' for s in all_scenes)}",
     ]
     for relative in [*tracks, *[item.split("@", 1)[0] for item in sounds]]:
         source = ROOT / relative

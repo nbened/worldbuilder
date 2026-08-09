@@ -9,7 +9,8 @@
   "defaults": {
     "fade_seconds": 3,
     "track_crossfade": 2,
-    "open_close_fade": 2
+    "open_close_fade": 2,
+    "map_seconds": 30
   },
   "scenes": [
     {
@@ -21,8 +22,10 @@
       "pan": "none",
       "zoom": 1,
       "tracks": [
-        "assets/music/Pumpkin Sax Parade.wav",
-        "assets/music/Pumpkin Static.wav"
+        "assets/music/Dusk at the Platform.mp3",
+        "assets/music/Dusk at the Platform (3).mp3",
+        "assets/music/Dusk at the Platform (2).mp3",
+        "assets/music/Dusk at the Platform (1).mp3"
       ],
       "effects": [],
       "animations": [
@@ -57,7 +60,31 @@
           "loop_out": null
         }
       ],
+      "sounds": [
+        {
+          "file": "assets/sounds/low-talking.mp3",
+          "volume": 30
+        }
+      ],
+      "image_prompt": "",
+      "music_prompt": "",
+      "is_transition": false
+    },
+    {
+      "title": "Scene 4",
+      "image": "assets/images/map.png",
+      "map": {
+        "seconds": 15
+      },
+      "pan": "none",
+      "zoom": 1,
+      "tracks": [],
       "sounds": [],
+      "effects": [],
+      "animations": [],
+      "is_transition": true,
+      "transition_in": "fade",
+      "transition_out": "fade",
       "image_prompt": "",
       "music_prompt": ""
     },
@@ -112,6 +139,24 @@
       "music_prompt": "Gypsy jazz, minor swing. Lead acoustic archtop guitar playing a\nslinky chromatic descending melody, then fast single-note runs.\nSecond guitar driving hard la pompe rhythm, percussive and dry.\nUpright bass vamping on a repeating figure, hypnotic, staying on\none chord. Fiddle takes the second solo with heavy bow attack.\nD Phrygian dominant over a D7 flat 9 vamp, 104 BPM, swung. Dark,\ntense, propulsive. The harmony never resolves, it just keeps\ncircling. Menacing rather than cheerful. Builds in intensity\nwithout changing chord."
     },
     {
+      "title": "Scene 4",
+      "image": "assets/images/map.png",
+      "map": {
+        "seconds": 30
+      },
+      "pan": "none",
+      "zoom": 1,
+      "tracks": [],
+      "sounds": [],
+      "effects": [],
+      "animations": [],
+      "is_transition": true,
+      "transition_in": "fade",
+      "transition_out": "fade",
+      "image_prompt": "",
+      "music_prompt": ""
+    },
+    {
       "title": "Campfire",
       "image": "assets/images/fire.png",
       "map": {
@@ -121,7 +166,8 @@
       "zoom": 1,
       "tracks": [
         "assets/music/Campfire Minor 2.mp3",
-        "assets/music/Campfire Minor.mp3"
+        "assets/music/Campfire Minor.mp3",
+        "assets/music/The Last Warm Night.mp3"
       ],
       "effects": [],
       "animations": [
@@ -130,11 +176,13 @@
           "x": 0.3750958532574533,
           "y": 0.5646439624654837,
           "w": 0.28,
+          "h": null,
           "brightness": 100,
           "saturation": 100,
           "speed": 100,
           "aspect": "native",
           "soft_edges": true,
+          "locked": false,
           "loop_in": null,
           "loop_out": 10
         },
@@ -143,11 +191,13 @@
           "x": 0.03405635621856367,
           "y": 0.48351651373072996,
           "w": 0.34043880530123755,
+          "h": null,
           "brightness": 100,
           "saturation": 100,
           "speed": 100,
           "aspect": "native",
           "soft_edges": true,
+          "locked": false,
           "loop_in": null,
           "loop_out": null
         },
@@ -156,11 +206,13 @@
           "x": 0.8010953987767998,
           "y": 0.23550072067610475,
           "w": 0.10813573334876585,
+          "h": null,
           "brightness": 100,
           "saturation": 100,
           "speed": 85,
           "aspect": "native",
           "soft_edges": true,
+          "locked": false,
           "loop_in": null,
           "loop_out": 2.25
         }
@@ -168,7 +220,7 @@
       "sounds": [
         {
           "file": "assets/sounds/crickets.mp3",
-          "volume": 37
+          "volume": 17
         }
       ],
       "image_prompt": "SCENE: A fire clearing on a wooded ridge above the town, at dusk.\n\nA ring of rough grey stones encircles a small campfire burning low \nand bright at the center of a gravel clearing. Four handcrafted \nfigures sit around it in weathered wooden Adirondack chairs, angled \ninward toward the flames, seated naturally with relaxed posture. A \nfifth figure sits slightly apart on a fallen log at the edge of the \nring. A stack of split logs rests to one side, a battered tin coffee \npot sits on a flat stone near the fire, and an iron lantern hangs \nunlit from a low branch.\n\nThe clearing is enclosed by pines and autumn maples in deep rust and \namber, with mossy rock outcrops and drifts of fallen leaves across \nthe gravel. Through a gap in the trees at the far edge of the frame, \nfar below and softly out of focus, a few warm lit windows of the \ntown are just visible, with the faint glow of a locomotive headlamp \non the rail line beyond.\n\nLIGHT: The campfire is the dominant light source and the scene is lit \nalmost entirely by it. Warm orange light falls across the stones, the \ngravel, the chairs, and the figures' faces and hands, falling off \nquickly into darkness at the edges of the clearing. Long soft shadows \nstretch outward from the fire ring. Above the treeline the sky is \ndeep dusk blue, the last cold light of the day, contrasting against \nthe warm firelight below.\n\nCAST: One figure wears a dusty rose coat, the only cool pink in the \nframe. She stands at the edge of the clearing near the stacked logs, \nhalf turned away, partially obscured by a chair back. She is small in \nframe and not the focal point.\n\nCAMERA: Elevated three-quarter view, roughly forty degrees above the \nclearing, close in, as if leaning over a model railway table. Never at \nthe figures' eye level. Shallow tilt-shift depth of field with the \nfire ring in sharp focus and the treeline and distant town softly \nblurred.\n\nMOOD: Quiet, intimate, the end of the day. Warm but with an ache \nunder it, the last good evening before the season turns.",

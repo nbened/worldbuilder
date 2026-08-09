@@ -15,6 +15,7 @@ const state = {
   note: "",
   pickerOpen: false,
   movingScene: null, // index of scene waiting to be placed, or null
+  placingTransition: null, // index of multi-use transition waiting to be placed, or null
   movingSong: null, // index of song waiting to be placed, or null
   pruneImages: false,
   pruneSongs: false,
@@ -40,7 +41,9 @@ let drag = null;
 let saveTimer = null;
 let pollTimer = null;
 let overlayUi = null;
+let renderEtaSamples = [];
 const OVERLAY_FADE = 0.6;
+const DEFAULT_MAP_SECONDS = 30;
 
 /* ---------- helpers ---------- */
 
@@ -250,7 +253,15 @@ const DEFAULT_PROMPT =
 function ensureScript() {
   if (!state.script) return;
   state.script.scenes ||= [];
-  state.script.defaults ||= { fade_seconds: 3, track_crossfade: 2, open_close_fade: 2 };
+  state.script.defaults ||= {
+    fade_seconds: 3,
+    track_crossfade: 2,
+    open_close_fade: 2,
+    map_seconds: DEFAULT_MAP_SECONDS,
+  };
+  if (state.script.defaults.map_seconds == null) {
+    state.script.defaults.map_seconds = DEFAULT_MAP_SECONDS;
+  }
   ensureOverlays();
   ensureCreativeBrief();
   if (!state.script.scenes.length) state.script.scenes.push(blankScene());
@@ -337,16 +348,54 @@ function blankScene() {
   return {
     title: `Scene ${((state.script.scenes || []).length || 0) + 1}`,
     image: state.assets.images[0]?.path || "",
-    map: { seconds: 0 },
+    map: { seconds: DEFAULT_MAP_SECONDS },
     pan: "none",
     zoom: 1,
     tracks: [],
     sounds: [],
     effects: [],
     animations: [],
+    is_transition: false,
+    transition_in: "fade",
+    transition_out: "fade",
     image_prompt: "",
     music_prompt: "",
   };
+}
+
+function blankTransition() {
+  const entry = blankScene();
+  const n = scenes().filter((scene) => scene.is_transition).length + 1;
+  entry.is_transition = true;
+  entry.title = `Transition ${n}`;
+  entry.tracks = [];
+  entry.map = { seconds: DEFAULT_MAP_SECONDS };
+  entry.transition_in = "fade";
+  entry.transition_out = "fade";
+  return entry;
+}
+
+const TRANSITION_FX = [{ id: "fade", label: "Fade" }];
+
+function transitionFxSelect(value, onPick, label) {
+  return h(
+    "label",
+    { class: "transition-fx-field" },
+    h("span", { text: label }),
+    h(
+      "select",
+      {
+        class: "transition-fx-select",
+        value: value || "fade",
+        onChange: (event) => onPick(event.target.value),
+      },
+      TRANSITION_FX.map((fx) => h("option", { value: fx.id, text: fx.label }))
+    )
+  );
+}
+
+function isTransitionScene(entry = scene()) {
+  return !!entry?.is_transition;
 }
 
 const sceneEffects = (index = state.sceneIndex) => (scene(index).effects ||= []);
@@ -756,7 +805,43 @@ function scene(index = state.sceneIndex) {
 
 const sceneSongs = (index = state.sceneIndex) => (scene(index).tracks ||= []);
 
+/** Map path + opacity for a transition overlay sitting on top of a normal scene. */
+function transitionOverlayAt(at = player.at) {
+  const list = scenes();
+  const item = activeVideoItem(at);
+  if (!item || item.isTransition || !(item.duration > 0)) return null;
+  const local = Math.max(0, at - item.start);
+  const fade = Math.max(0.25, Number(state.script.defaults?.fade_seconds ?? 3));
+  const mapOf = (entry) => entry?.image || state.script?.map || "";
+
+  const after = list[item.index + 1];
+  if (after?.is_transition) {
+    const hold = Math.max(0, Number(after.map?.seconds || 0) / 2);
+    if (hold > 0.05 && local >= item.duration - hold - 0.001) {
+      const into = local - (item.duration - hold);
+      const opacity = Math.min(1, Math.max(0, into / fade));
+      const path = mapOf(after);
+      if (path) return { path, opacity, title: after.title || "Transition" };
+    }
+  }
+
+  const before = list[item.index - 1];
+  if (before?.is_transition) {
+    const hold = Math.max(0, Number(before.map?.seconds || 0) / 2);
+    if (hold > 0.05 && local <= hold + 0.001) {
+      const remaining = hold - local;
+      const opacity = remaining >= fade ? 1 : Math.min(1, Math.max(0, remaining / fade));
+      const path = mapOf(before);
+      if (path) return { path, opacity, title: before.title || "Transition" };
+    }
+  }
+
+  return null;
+}
+
 function sceneSequence(index) {
+  if (isTransitionScene(scene(index))) return { list: [], total: 0 };
+
   const crossfade = Number(state.script.defaults?.track_crossfade ?? 2);
   let cursor = 0;
   const list = sceneSongs(index).map((entry) => {
@@ -777,6 +862,8 @@ function videoTimeline() {
   let start = 0;
   const items = scenes().map((entry, index) => {
     const { list, total } = sceneSequence(index);
+    const mapOnly =
+      !!entry.is_transition && Number(entry.map?.seconds || 0) > 0 && !entry.image;
     const item = {
       index,
       title: entry.title || `Scene ${index + 1}`,
@@ -784,7 +871,8 @@ function videoTimeline() {
       songs: list,
       duration: total,
       start,
-      missing: !entry.image || !imageExists(entry.image),
+      isTransition: !!entry.is_transition,
+      missing: mapOnly ? false : !entry.image || !imageExists(entry.image),
     };
     start += total;
     return item;
@@ -829,11 +917,19 @@ function audioKey() {
         return `${sound.file}@${sound.volume}`;
       })
       .join(",");
+  const sceneSig = (index) => {
+    const entry = scenes()[index];
+    if (entry?.is_transition) {
+      const hold = Number(entry.map?.seconds || 0);
+      return `t:${entry.image || ""}:${hold}:${entry.transition_in || "fade"}:${entry.transition_out || "fade"}`;
+    }
+    return (entry?.tracks || []).map(fileOf).join(",");
+  };
   if (scope.mode === "scene") {
-    return `${state.videoId}|scene:${scope.scene}|${sceneSongs(scope.scene).map(fileOf).join(",")}|${soundSig(scope.scene)}`;
+    return `${state.videoId}|scene:${scope.scene}|${sceneSig(scope.scene)}|${soundSig(scope.scene)}`;
   }
   return `${state.videoId}|video|${scenes()
-    .map((entry, index) => `${(entry.tracks || []).map(fileOf).join(",")}+${soundSig(index)}`)
+    .map((entry, index) => `${sceneSig(index)}+${soundSig(index)}+t${entry.is_transition ? 1 : 0}`)
     .join("|")}`;
 }
 
@@ -940,12 +1036,11 @@ function paintPlayhead() {
     scrubber.elapsed.textContent = clock(player.at);
 
     if (scope.mode === "video") {
-      const { items } = videoTimeline();
-      let active = -1;
-      items.forEach((item, index) => {
-        if (player.at >= item.start - 0.001) active = index;
-      });
-      scrubber.cards?.forEach((card, index) => card.classList.toggle("playing", index === active));
+      const activeItem = activeVideoItem();
+      const activeIndex = activeItem?.index ?? -1;
+      scrubber.cards?.forEach((card) =>
+        card.classList.toggle("playing", Number(card.dataset.sceneIndex) === activeIndex)
+      );
     } else {
       const { list } = sceneSequence(state.sceneIndex);
       let songActive = -1;
@@ -1003,6 +1098,24 @@ function paintOverlays() {
       overlayUi.still.classList.add("blank");
     }
   }
+
+  if (overlayUi.map) {
+    const overlay = transitionOverlayAt(at);
+    const path = overlay?.path || "";
+    const opacity = overlay?.opacity ?? 0;
+    if (path && overlayUi.map.dataset.path !== path) {
+      overlayUi.map.dataset.path = path;
+      const wide = state.pictureExpanded ? 1600 : 1200;
+      overlayUi.map.style.backgroundImage = `url(/thumb?path=${encodeURIComponent(path)}&w=${wide})`;
+    } else if (!path && overlayUi.map.dataset.path !== "") {
+      overlayUi.map.dataset.path = "";
+      overlayUi.map.style.backgroundImage = "";
+    }
+    overlayUi.map.style.opacity = String(opacity);
+    overlayUi.map.classList.toggle("is-hidden", opacity <= 0.01);
+  }
+
+  syncVideoPreviewMotion(at);
 
   if (overlayUi.songTitle) {
     const song = currentSongAt(at, list);
@@ -1084,6 +1197,7 @@ function detailsComplete() {
 
 function sceneDetailsComplete(entry = scene()) {
   ensureSceneBrief(entry);
+  if (entry.is_transition) return Boolean((entry.image_prompt || "").trim() || entry.image);
   return Boolean((entry.image_prompt || "").trim() && (entry.music_prompt || "").trim());
 }
 
@@ -1183,23 +1297,17 @@ function paintDetailsChrome() {
   }
 }
 
+function hasOutput(output) {
+  return Boolean(output?.exists || output?.ready);
+}
+
 function outputTag(output) {
-  if (!output) return null;
-  if (output.ready) {
-    return h("span", {
-      class: "ready-tag is-ready",
-      text: "Rendered",
-      title: output.name ? `Saved as out/${output.name}` : "",
-    });
-  }
-  if (output.exists || output.stale) {
-    return h("span", {
-      class: "ready-tag is-stale",
-      text: "Outdated",
-      title: output.name ? `out/${output.name} is older than the script` : "Render is older than the script",
-    });
-  }
-  return null;
+  if (!hasOutput(output)) return null;
+  return h("span", {
+    class: "ready-tag is-ready",
+    text: "Rendered",
+    title: output.name ? `Saved as out/${output.name}` : "Ready to stitch",
+  });
 }
 
 function sceneOutput(index) {
@@ -1209,14 +1317,13 @@ function sceneOutput(index) {
 function videoOutputSummary(video) {
   const outputs = video.outputs || {};
   const full = outputs.video;
-  if (full?.ready) return outputTag(full);
-  if (full?.exists || full?.stale) return outputTag(full);
+  if (hasOutput(full)) return outputTag(full);
   const scenes = Object.values(outputs.scenes || {});
-  const ready = scenes.filter((scene) => scene.ready).length;
-  if (ready > 0) {
+  const rendered = scenes.filter((scene) => hasOutput(scene)).length;
+  if (rendered > 0) {
     return h("span", {
-      class: "ready-tag is-partial",
-      text: `${ready}/${scenes.length} scenes`,
+      class: "ready-tag is-ready",
+      text: `${rendered}/${scenes.length} scenes`,
       title: "Scene renders in out/",
     });
   }
@@ -1254,9 +1361,56 @@ async function refreshOutputs() {
 
 let lastRenderStatus = "idle";
 
+function resetRenderEta() {
+  renderEtaSamples = [];
+  state.renderEta = null;
+}
+
+function noteRenderProgress(percent) {
+  const now = Date.now();
+  const value = Math.max(0, Math.min(100, Number(percent) || 0));
+  const last = renderEtaSamples[renderEtaSamples.length - 1];
+  if (!last || value > last.percent + 0.15) {
+    renderEtaSamples.push({ t: now, percent: value });
+    if (renderEtaSamples.length > 40) renderEtaSamples.shift();
+  }
+  state.renderEta = estimateRenderEta(value);
+}
+
+function estimateRenderEta(percent) {
+  if (percent >= 99) return 0;
+  if (renderEtaSamples.length < 2) return null;
+  const samples = renderEtaSamples.length >= 4 ? renderEtaSamples.slice(-8) : renderEtaSamples;
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  const dp = last.percent - first.percent;
+  const dt = (last.t - first.t) / 1000;
+  if (dp < 0.4 || dt < 1) return null;
+  return Math.max(0, (100 - percent) / (dp / dt));
+}
+
+function formatClockTime(date) {
+  const hours = date.getHours();
+  const mins = String(date.getMinutes()).padStart(2, "0");
+  const h12 = hours % 12 || 12;
+  const ampm = hours >= 12 ? "PM" : "AM";
+  return `${h12}:${mins} ${ampm}`;
+}
+
+function formatRenderEta(seconds) {
+  if (seconds === 0) return "Finishing…";
+  if (seconds == null || !Number.isFinite(seconds)) return "Calculating…";
+  const total = Math.max(1, Math.ceil(seconds));
+  const minutes = Math.max(1, Math.ceil(total / 60));
+  const left = minutes === 1 ? "~1 min left" : `~${minutes} min left`;
+  const eta = formatClockTime(new Date(Date.now() + total * 1000));
+  return `${left} · ${eta}`;
+}
+
 async function generate(sceneNumber = null) {
   clearTimeout(saveTimer);
   await save();
+  resetRenderEta();
   const response = await fetch(withVideo("/api/render"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1264,6 +1418,7 @@ async function generate(sceneNumber = null) {
   });
   state.render = await response.json();
   lastRenderStatus = state.render.status;
+  if (state.render.status === "running") noteRenderProgress(state.render.percent || 0);
   render();
   poll();
 }
@@ -1272,6 +1427,7 @@ async function stopGenerate() {
   const response = await fetch("/api/render/stop", { method: "POST" });
   state.render = await response.json();
   lastRenderStatus = state.render.status;
+  resetRenderEta();
   render();
 }
 
@@ -1291,14 +1447,17 @@ function downloadSceneImage() {
 function poll() {
   clearTimeout(pollTimer);
   pollTimer = setTimeout(async () => {
-    const previous = lastRenderStatus;
     state.render = await (await fetch("/api/render")).json();
     lastRenderStatus = state.render.status;
+    if (state.render.status === "running") {
+      noteRenderProgress(state.render.percent || 0);
+    }
     if (state.render.status === "done") {
+      resetRenderEta();
       await refreshOutputs();
-      if (previous === "running" && state.render.ready && state.render.video === state.videoId) {
-        downloadOutput(state.render.scene || null);
-      }
+    }
+    if (state.render.status === "error" || state.render.status === "idle") {
+      resetRenderEta();
     }
     render();
     if (state.render.status === "running") poll();
@@ -1345,20 +1504,65 @@ function topbar(actions = []) {
   );
 }
 
+function sceneDownloadIconButton(sceneNumber, sceneOut) {
+  const ready = hasOutput(sceneOut);
+  return h(
+    "button",
+    {
+      class: "btn ghost icon-btn",
+      type: "button",
+      disabled: !ready,
+      title: ready ? sceneOut.name || "Download video" : "Process first to download",
+      "aria-label": ready ? "Download video" : "Process first to download",
+      onClick: () => {
+        if (!ready) return;
+        downloadOutput(sceneNumber);
+      },
+    },
+    downloadIcon()
+  );
+}
+
 function exportActions({ sceneMode = false } = {}) {
-  const busy = state.render.status === "running";
+  const busy = state.render.status === "running" && state.render.video === state.videoId;
   const { total } = videoTimeline();
   const sceneTotal = sceneSequence(state.sceneIndex).total;
   const sceneNumber = state.sceneIndex + 1;
   const sceneOut = sceneOutput(state.sceneIndex);
   const videoOut = state.outputs?.video;
+  const transition = sceneMode && isTransitionScene();
 
   if (busy) {
     const label =
       state.render.kind === "scene"
-        ? `Stop rendering scene ${state.render.percent}%`
-        : `Stop rendering ${state.render.percent}%`;
-    return [
+        ? `Stop scene ${state.render.percent}%`
+        : `Stop video ${state.render.percent}%`;
+    const actions = [];
+    if (sceneMode && !transition) {
+      actions.push(sceneDownloadIconButton(sceneNumber, sceneOut));
+    } else if (!sceneMode && hasOutput(videoOut)) {
+      actions.push(
+        h(
+          "button",
+          {
+            class: "btn ghost",
+            type: "button",
+            title: videoOut.name || "Download video",
+            "aria-label": "Download video",
+            onClick: () => downloadOutput(),
+          },
+          "Download"
+        )
+      );
+    }
+    actions.push(
+      h("span", {
+        class: "meta render-eta",
+        text: formatRenderEta(state.renderEta),
+        title: "Estimated time left and finish time",
+      })
+    );
+    actions.push(
       h(
         "button",
         {
@@ -1368,59 +1572,71 @@ function exportActions({ sceneMode = false } = {}) {
           onClick: () => stopGenerate(),
           text: label,
         }
-      ),
-    ];
+      )
+    );
+    return actions;
   }
 
   if (sceneMode) {
-    const actions = [];
-    if (sceneOut?.ready || sceneOut?.exists) {
-      actions.push(
-        h(
-          "button",
-          {
-            class: "btn ghost",
-            type: "button",
-            title: sceneOut.name || "Download scene render",
-            onClick: () => downloadOutput(sceneNumber),
-          },
-          sceneOut.ready ? "Download scene" : "Download outdated"
-        )
-      );
-    }
-    actions.push(
+    return [
       h(
         "button",
         {
           class: "btn primary",
-          disabled: !sceneTotal,
+          disabled: transition || !sceneTotal,
+          title: transition
+            ? "Transitions bake into neighboring scenes — use Process Video"
+            : "Render this scene only",
           onClick: () => generate(sceneNumber),
         },
-        sceneOut?.ready || sceneOut?.exists ? "Update in video" : "Add to video"
-      )
-    );
-    return actions;
+        "Process Scene"
+      ),
+      transition
+        ? null
+        : h(
+            "button",
+            {
+              class: "btn ghost",
+              type: "button",
+              disabled: !hasOutput(sceneOut),
+              title: hasOutput(sceneOut)
+                ? sceneOut.name || "Download this scene"
+                : "Process Scene first",
+              onClick: () => {
+                if (!hasOutput(sceneOut)) return;
+                downloadOutput(sceneNumber);
+              },
+            },
+            "Download"
+          ),
+    ].filter(Boolean);
   }
 
   return [downloadVideoControl(), generateVideoButton(total, videoOut)];
 }
 
 function renderGateItems() {
-  const items = scenes().map((entry, index) => ({
-    key: `scene-${index}`,
-    label: entry.title?.trim() || `Scene ${index + 1}`,
-    ready: Boolean(sceneOutput(index)?.ready),
-  }));
+  const items = scenes()
+    .map((entry, index) =>
+      entry.is_transition
+        ? null
+        : {
+            key: `scene-${index}`,
+            label: entry.title?.trim() || `Scene ${index + 1}`,
+            ready: hasOutput(sceneOutput(index)),
+          }
+    )
+    .filter(Boolean);
   items.push({
     key: "video",
     label: "Full video",
-    ready: Boolean(state.outputs?.video?.ready),
+    ready: hasOutput(state.outputs?.video),
   });
   return items;
 }
 
 function downloadVideoControl() {
-  const ready = Boolean(state.outputs?.video?.ready);
+  const ready = hasOutput(state.outputs?.video);
   const items = renderGateItems();
   const pending = items.filter((item) => !item.ready);
 
@@ -1452,7 +1668,7 @@ function downloadVideoControl() {
     h(
       "div",
       { class: "download-gate-menu", role: "status" },
-      h("p", { class: "download-gate-title", text: "Please render these first" }),
+      h("p", { class: "download-gate-title", text: "Please process these first" }),
       h(
         "ul",
         { class: "download-gate-list" },
@@ -1474,8 +1690,8 @@ function downloadVideoControl() {
           class: "download-gate-hint",
           text:
             pending.length === 1 && pending[0].key === "video"
-              ? "Generate the full video to unlock download."
-              : "Render each scene, then generate the full video.",
+              ? "Process Video to unlock download."
+              : "Process each scene, then Process Video.",
         })
     )
   );
@@ -1487,9 +1703,10 @@ function generateVideoButton(total, videoOut) {
     {
       class: "btn primary",
       disabled: !total,
+      title: hasOutput(videoOut) ? videoOut.name || "Re-render full video" : "Render full video",
       onClick: () => generate(),
     },
-    videoOut?.ready ? "Re-render video" : "Generate video"
+    "Process Video"
   );
 }
 
@@ -1651,7 +1868,12 @@ function sceneDetails() {
         h(
           "div",
           { class: "brief-head" },
-          h("span", { class: "meta", text: "Prompts for generating this scene’s still and songs" }),
+          h("span", {
+            class: "meta",
+            text: entry.is_transition
+              ? "Map/still for this overlay — neighboring scenes keep their full songs"
+              : "Prompts for generating this scene’s still and songs",
+          }),
           h(
             "button",
             {
@@ -1669,7 +1891,7 @@ function sceneDetails() {
           h(
             "div",
             { class: "brief-label-row" },
-            briefLabel("Image prompt", true),
+            briefLabel("Image prompt", !entry.is_transition),
             h(
               "span",
               { class: "brief-copy-group" },
@@ -1696,39 +1918,40 @@ function sceneDetails() {
             },
           })
         ),
-        h(
-          "div",
-          { class: "brief-field" },
+        !entry.is_transition &&
           h(
             "div",
-            { class: "brief-label-row" },
-            briefLabel("Music prompt", true),
+            { class: "brief-field" },
             h(
-              "span",
-              { class: "brief-copy-group" },
-              briefCopyButton(() => entry.music_prompt || "", "Copy this scene’s music note only"),
-              briefCopyButton(
-                () => fullSceneMusicPrompt(entry),
-                "Copy full music prompt (episode + scene) for this scene’s songs",
-                "Copy full"
+              "div",
+              { class: "brief-label-row" },
+              briefLabel("Music prompt", true),
+              h(
+                "span",
+                { class: "brief-copy-group" },
+                briefCopyButton(() => entry.music_prompt || "", "Copy this scene’s music note only"),
+                briefCopyButton(
+                  () => fullSceneMusicPrompt(entry),
+                  "Copy full music prompt (episode + scene) for this scene’s songs",
+                  "Copy full"
+                )
               )
-            )
-          ),
-          h("p", {
-            class: "brief-hint",
-            text: "What we hear here — Copy full includes the episode music prompt.",
-          }),
-          h("textarea", {
-            class: "brief-input destination-prompt",
-            rows: 4,
-            value: entry.music_prompt || "",
-            placeholder: "Songs, texture, and energy for this stop.",
-            onInput: (event) => {
-              entry.music_prompt = event.target.value;
-              markDetailsDirty();
-            },
-          })
-        )
+            ),
+            h("p", {
+              class: "brief-hint",
+              text: "What we hear here — Copy full includes the episode music prompt.",
+            }),
+            h("textarea", {
+              class: "brief-input destination-prompt",
+              rows: 4,
+              value: entry.music_prompt || "",
+              placeholder: "Songs, texture, and energy for this stop.",
+              onInput: (event) => {
+                entry.music_prompt = event.target.value;
+                markDetailsDirty();
+              },
+            })
+          )
       )
   );
 }
@@ -2072,21 +2295,24 @@ function videoView() {
           "span",
           { class: "meta" },
           (() => {
-            const sceneCount = scenes().length;
-            const ready = scenes().filter((_, index) => sceneOutput(index)?.ready).length;
+            const normalIndexes = scenes()
+              .map((scene, index) => (!scene.is_transition ? index : -1))
+              .filter((index) => index >= 0);
+            const ready = normalIndexes.filter((index) => hasOutput(sceneOutput(index))).length;
             const parts = [clock(total)];
-            if (ready) parts.push(`${ready}/${sceneCount} rendered`);
+            if (ready) parts.push(`${ready}/${normalIndexes.length} rendered`);
             return parts.join(" · ");
           })()
         )
       ),
-      sceneStrip(items),
+      sceneTimeline(items),
       h(
         "button",
         {
           class: "btn ghost add",
           type: "button",
           onClick: () => {
+            state.placingTransition = null;
             scenes().push(blankScene());
             const index = scenes().length - 1;
             changed();
@@ -2094,7 +2320,8 @@ function videoView() {
           },
         },
         "+  Add scene"
-      )
+      ),
+      transitionPool()
     )
   );
 }
@@ -2143,6 +2370,95 @@ function overlayToggles() {
   );
 }
 
+/** Read-only animation layer for the video-page preview (no drag chrome). */
+function previewAnimLayer(entry) {
+  const normalized = normalizeAnim(entry);
+  if (!normalized.file) return null;
+  if (!(state.assets.animations || []).some((item) => item.path === normalized.file)) return null;
+
+  const rate = Math.min(4, Math.max(0.1, (normalized.speed ?? 100) / 100));
+  const soft = normalized.soft_edges ? " soft-edges" : "";
+  const look = animCssFilter(normalized);
+  const primary = h("video", {
+    class: `anim-video${soft}`,
+    src: `/${normalized.file}`,
+    muted: true,
+    playsinline: true,
+    preload: "auto",
+  });
+  const secondary = h("video", {
+    class: `anim-video${soft}`,
+    src: `/${normalized.file}`,
+    muted: true,
+    playsinline: true,
+    preload: "auto",
+  });
+  const frontWrap = h("div", { class: "anim-video-wrap is-front" }, primary);
+  const backWrap = h("div", { class: "anim-video-wrap is-back" }, secondary);
+  muteVideo(primary);
+  muteVideo(secondary);
+  primary.playbackRate = rate;
+  secondary.playbackRate = rate;
+  primary.style.filter = look;
+  secondary.style.filter = look;
+
+  queueMicrotask(() => {
+    primary.playbackRate = rate;
+    secondary.playbackRate = rate;
+    bindSeamlessCrossfade(primary, secondary, frontWrap, backWrap, () =>
+      animLoopWindow(normalized, primary.duration || animSourceDuration(normalized))
+    );
+  });
+
+  const layer = h(
+    "div",
+    {
+      class: `anim-layer is-preview aspect-${normalized.aspect || "native"}`,
+      style: animLayerStyle(normalized),
+      "aria-hidden": "true",
+    },
+    frontWrap,
+    backWrap
+  );
+
+  const applyNativeAspect = () => {
+    if (Number.isFinite(normalized.h) && normalized.h > 0) return;
+    if ((normalized.aspect || "native") !== "native") return;
+    if (!primary.videoWidth || !primary.videoHeight) return;
+    layer.style.aspectRatio = animAspectCss(normalized, primary);
+  };
+  primary.addEventListener("loadedmetadata", applyNativeAspect);
+  if (primary.readyState >= 1) applyNativeAspect();
+
+  return layer;
+}
+
+/** Swap animation/effect layers when the active scene changes while scrubbing. */
+function syncVideoPreviewMotion(at = player.at) {
+  if (!overlayUi?.motion) return;
+  const item = activeVideoItem(at);
+  const index = item && !item.isTransition ? item.index : -1;
+  if (overlayUi.motionScene === index) return;
+  overlayUi.motionScene = index;
+  overlayUi.motion.replaceChildren();
+  if (index < 0) return;
+
+  const entry = scenes()[index];
+  if (!entry || entry.is_transition) return;
+
+  (entry.animations || []).forEach((anim) => {
+    const layer = previewAnimLayer(anim);
+    if (layer) overlayUi.motion.append(layer);
+  });
+
+  (entry.effects || [])
+    .map((effect) => normalizeEffect(effect))
+    .filter((effect) => (state.assets.effects || []).some((item) => item.path === effect.file))
+    .forEach((effect) => {
+      overlayUi.motion.append(effectLayer(effect.file, effect.speed));
+    });
+}
+
 function videoPreview() {
   const expanded = state.pictureExpanded;
   const overlays = ensureOverlays();
@@ -2166,8 +2482,19 @@ function videoPreview() {
         "data-path": "",
       });
 
+  const mapLayer = h("div", {
+    class: "picture-still picture-map-overlay is-hidden",
+    "data-path": "",
+    style: { opacity: "0" },
+  });
+
+  const motion = h("div", { class: "picture-motion", "aria-hidden": "true" });
+
   overlayUi = {
     still,
+    map: mapLayer,
+    motion,
+    motionScene: null,
     credit: creditLayer,
     song: songLayer,
     songTitle: songLayer?.querySelector(".lower-third-title") || null,
@@ -2206,6 +2533,8 @@ function videoPreview() {
         },
       },
       still,
+      motion,
+      mapLayer,
       !known && h("span", { class: "picture-empty", text: "Add a scene picture to preview lower thirds" }),
       creditLayer,
       songLayer
@@ -2226,117 +2555,361 @@ function placeScene(fromIndex, insertAt) {
   list.splice(Math.max(0, Math.min(at, list.length)), 0, moved);
   state.sceneIndex = list.indexOf(moved);
   state.movingScene = null;
+  state.placingTransition = null;
   changed();
 }
 
+function placeTransitionAfter(transIndex, afterSceneIndex) {
+  const list = scenes();
+  const source = list[transIndex];
+  if (!source?.is_transition) return;
+  // Stamp a copy — same transition can sit between many scene pairs.
+  // Audio stays on the neighboring scenes; this is a visual marker only.
+  const copy = JSON.parse(JSON.stringify(source));
+  let at = afterSceneIndex + 1;
+  while (at < list.length && list[at].is_transition) at += 1;
+  list.splice(at, 0, copy);
+  state.placingTransition = null;
+  state.movingScene = null;
+  changed();
+}
+
+function removeTransitionAt(index) {
+  const list = scenes();
+  if (!list[index]?.is_transition) return;
+  list.splice(index, 1);
+  if (state.sceneIndex >= list.length) state.sceneIndex = Math.max(0, list.length - 1);
+  state.placingTransition = null;
+  state.movingScene = null;
+  changed();
+}
+
+/** Normal scenes in order, with transition indexes sitting in the gaps between them. */
+function timelineLayout() {
+  const list = scenes();
+  const rows = [];
+  let i = 0;
+  const lead = [];
+  while (i < list.length && list[i].is_transition) {
+    lead.push(i);
+    i += 1;
+  }
+  rows.push({ type: "gap", afterIndex: -1, transitions: lead });
+  while (i < list.length) {
+    if (list[i].is_transition) {
+      i += 1;
+      continue;
+    }
+    const sceneIndex = i;
+    rows.push({ type: "scene", index: sceneIndex });
+    i += 1;
+    const mid = [];
+    while (i < list.length && list[i].is_transition) {
+      mid.push(i);
+      i += 1;
+    }
+    rows.push({ type: "gap", afterIndex: sceneIndex, transitions: mid });
+  }
+  return rows;
+}
+
 function sceneSlot(insertAt, fromIndex) {
-  // Slots next to the moving card's current edges are no-ops — skip them.
   if (insertAt === fromIndex || insertAt === fromIndex + 1) return null;
   return h("button", {
     class: "scene-slot",
     type: "button",
-    title: "Place here",
+    title: "Place scene here",
     "aria-label": "Place scene here",
     onClick: () => placeScene(fromIndex, insertAt),
   });
 }
 
-function sceneStrip(items) {
+function transitionGap(gap) {
+  const placing = state.placingTransition;
+  if (placing !== null) {
+    return h("button", {
+      class: "transition-drop",
+      type: "button",
+      title: "Add transition here (visual only — songs stay on the scenes)",
+      "aria-label": "Add transition here",
+      onClick: () => placeTransitionAfter(placing, gap.afterIndex),
+    });
+  }
+
+  if (!gap.transitions.length) {
+    return h("div", { class: "transition-gap-spacer", "aria-hidden": true });
+  }
+
+  return h(
+    "div",
+    { class: "transition-markers" },
+    ...gap.transitions.map((index) => {
+      const entry = scenes()[index];
+      const title = entry?.title || "Transition";
+      return h(
+        "div",
+        { class: "transition-dot-wrap", title: `${title} — visual overlay between scenes` },
+        h("button", {
+          class: "transition-dot",
+          type: "button",
+          "aria-label": `Open ${title}`,
+          onClick: () => go("scene", { videoId: state.videoId, sceneIndex: index }),
+        }),
+        h(
+          "button",
+          {
+            class: "transition-dot-x",
+            type: "button",
+            title: "Remove transition",
+            "aria-label": `Remove ${title}`,
+            onClick: (event) => {
+              event.stopPropagation();
+              removeTransitionAt(index);
+            },
+          },
+          "×"
+        )
+      );
+    })
+  );
+}
+
+function sceneCard(index, item) {
   const moving = state.movingScene;
-  const placing = moving !== null;
+  const placingScene = moving !== null;
+  const placingTransition = state.placingTransition !== null;
+
+  const open = () => {
+    if (placingScene || placingTransition) return;
+    go("scene", { videoId: state.videoId, sceneIndex: index });
+  };
+
+  return h(
+    "div",
+    {
+      class: `scene-card${item.missing ? " missing" : ""}${moving === index ? " moving" : ""}`,
+      "data-scene-index": String(index),
+    },
+    h(
+      "button",
+      {
+        class: "handle",
+        type: "button",
+        title: placingScene && moving === index ? "Cancel move" : "Move scene",
+        "aria-label": placingScene && moving === index ? "Cancel move" : "Move scene",
+        onClick: (event) => {
+          event.stopPropagation();
+          state.placingTransition = null;
+          state.movingScene = moving === index ? null : index;
+          render();
+        },
+      },
+      gripIcon()
+    ),
+    h("div", {
+      class: `scene-thumb${item.image && !item.missing ? "" : " blank"}`,
+      style:
+        item.image && !item.missing
+          ? { backgroundImage: `url(/thumb?path=${encodeURIComponent(item.image)}&w=360)` }
+          : {},
+      text: item.missing ? "no image" : "",
+      onClick: open,
+    }),
+    h(
+      "div",
+      { class: "scene-meta", onClick: open },
+      h(
+        "div",
+        { class: "scene-meta-top" },
+        h("span", { class: "name", text: item.title }),
+        outputTag(sceneOutput(index))
+      ),
+      h("span", {
+        class: "len",
+        text: `${item.songs.length} song${item.songs.length === 1 ? "" : "s"} · ${clock(item.duration)}`,
+      })
+    ),
+    h(
+      "button",
+      {
+        class: "trash",
+        type: "button",
+        title: "Remove scene",
+        onClick: (event) => {
+          event.stopPropagation();
+          if (scenes().filter((scene) => !scene.is_transition).length <= 1) {
+            state.note = "Keep at least one scene";
+            render();
+            return;
+          }
+          scenes().splice(index, 1);
+          if (state.sceneIndex >= scenes().length) state.sceneIndex = Math.max(0, scenes().length - 1);
+          state.movingScene = null;
+          state.placingTransition = null;
+          changed();
+        },
+      },
+      trashIcon()
+    )
+  );
+}
+
+/** Multi-use transition card — same thumbnail as a scene, Add instead of a grip. */
+function transitionCard(index, item) {
+  const entry = scenes()[index];
+  const selected = state.placingTransition === index;
+  const mapHold = Number(entry?.map?.seconds) || 0;
+  const known = item.image && !item.missing;
+
+  return h(
+    "div",
+    {
+      class: `scene-card is-transition${selected ? " selected" : ""}`,
+    },
+    h(
+      "button",
+      {
+        class: `transition-use-btn${selected ? " is-on" : ""}`,
+        type: "button",
+        title: selected ? "Cancel" : "Add between two scenes (visual only)",
+        onClick: (event) => {
+          event.stopPropagation();
+          state.movingScene = null;
+          state.placingTransition = selected ? null : index;
+          render();
+        },
+      },
+      selected ? "Cancel" : "Add"
+    ),
+    h("div", {
+      class: `scene-thumb${known ? "" : " blank"}`,
+      style: known
+        ? { backgroundImage: `url(/thumb?path=${encodeURIComponent(item.image)}&w=360)` }
+        : {},
+      text: known ? "" : "no image",
+      onClick: () => {
+        state.placingTransition = null;
+        go("scene", { videoId: state.videoId, sceneIndex: index });
+      },
+    }),
+    h(
+      "div",
+      {
+        class: "scene-meta",
+        onClick: () => {
+          state.placingTransition = null;
+          go("scene", { videoId: state.videoId, sceneIndex: index });
+        },
+      },
+      h("div", { class: "scene-meta-top" }, h("span", { class: "name", text: item.title })),
+      h("span", {
+        class: "len",
+        text: mapHold > 0 ? `Visual · ${clock(mapHold)}` : "Visual overlay",
+      })
+    ),
+    h(
+      "button",
+      {
+        class: "trash",
+        type: "button",
+        title: "Delete transition",
+        onClick: (event) => {
+          event.stopPropagation();
+          removeTransitionAt(index);
+        },
+      },
+      trashIcon()
+    )
+  );
+}
+
+function sceneTimeline(items) {
+  const moving = state.movingScene;
+  const placingTransition = state.placingTransition;
+  const placingScene = moving !== null;
+  const layout = timelineLayout();
   const cards = [];
   const scrubCards = [];
 
-  if (placing) cards.push(sceneSlot(0, moving));
+  layout.forEach((row) => {
+    if (row.type === "gap") {
+      if (placingScene) {
+        const slot = sceneSlot(row.afterIndex + 1, moving);
+        if (slot) cards.push(slot);
+      } else {
+        const gap = transitionGap(row);
+        if (gap) cards.push(gap);
+      }
+      return;
+    }
 
-  items.forEach((item, index) => {
-    const card = h(
-      "div",
-      {
-        class: `scene-card${item.missing ? " missing" : ""}${moving === index ? " moving" : ""}`,
-      },
-      h(
-        "button",
-        {
-          class: "handle",
-          type: "button",
-          title: placing && moving === index ? "Cancel move" : "Move scene",
-          "aria-label": placing && moving === index ? "Cancel move" : "Move scene",
-          onClick: (event) => {
-            event.stopPropagation();
-            state.movingScene = moving === index ? null : index;
-            render();
-          },
-        },
-        gripIcon()
-      ),
-      h("div", {
-        class: `scene-thumb${item.image && !item.missing ? "" : " blank"}`,
-        style:
-          item.image && !item.missing
-            ? { backgroundImage: `url(/thumb?path=${encodeURIComponent(item.image)}&w=360)` }
-            : {},
-        text: item.missing ? "no image" : "",
-        onClick: () => {
-          if (placing) return;
-          go("scene", { videoId: state.videoId, sceneIndex: index });
-        },
-      }),
-      h(
-        "div",
-        {
-          class: "scene-meta",
-          onClick: () => {
-            if (placing) return;
-            go("scene", { videoId: state.videoId, sceneIndex: index });
-          },
-        },
-        h(
-          "div",
-          { class: "scene-meta-top" },
-          h("span", { class: "name", text: item.title }),
-          outputTag(sceneOutput(index))
-        ),
-        h("span", {
-          class: "len",
-          text: `${item.songs.length} song${item.songs.length === 1 ? "" : "s"} · ${clock(item.duration)}`,
-        })
-      ),
-      h(
-        "button",
-        {
-          class: "trash",
-          type: "button",
-          title: "Remove scene",
-          onClick: (event) => {
-            event.stopPropagation();
-            if (scenes().length === 1) {
-              state.note = "Keep at least one scene";
-              render();
-              return;
-            }
-            scenes().splice(index, 1);
-            if (state.sceneIndex >= scenes().length) state.sceneIndex = scenes().length - 1;
-            state.movingScene = null;
-            changed();
-          },
-        },
-        trashIcon()
-      )
-    );
+    const index = row.index;
+    const item = items[index];
+    if (!item) return;
+    const card = sceneCard(index, item);
     scrubCards.push(card);
     cards.push(card);
-    if (placing) cards.push(sceneSlot(index + 1, moving));
   });
 
   if (scrubber) scrubber.cards = scrubCards;
 
   return h(
     "div",
-    { class: `scene-strip${placing ? " is-placing" : ""}` },
+    {
+      class: `scene-strip${placingScene ? " is-placing" : ""}${
+        placingTransition !== null ? " is-placing-transition" : ""
+      }`,
+    },
     cards.length
       ? cards.filter(Boolean)
       : h("p", { class: "empty-note drop-hint", text: "Add a scene to get started" })
+  );
+}
+
+function transitionPool() {
+  const { items } = videoTimeline();
+  const transitions = scenes()
+    .map((entry, index) => ({ entry, index, item: items[index] }))
+    .filter((row) => row.entry.is_transition);
+  const placing = state.placingTransition;
+
+  return h(
+    "div",
+    { class: "transition-pool" },
+    h(
+      "div",
+      { class: "sequence-head" },
+      h("span", { text: "Multi-use" }),
+      h("span", {
+        class: "meta",
+        text:
+          placing !== null
+            ? "Click a red slot — stamps a copy (you can add this between many scenes)"
+            : "Add stamps a visual overlay between scenes; each scene keeps its own songs",
+      })
+    ),
+    h(
+      "div",
+      {
+        class: `scene-strip transition-strip${placing !== null ? " is-placing-transition" : ""}`,
+      },
+      transitions.map(({ index, item }) => transitionCard(index, item)),
+      h(
+        "button",
+        {
+          class: "btn ghost transition-add",
+          type: "button",
+          onClick: () => {
+            state.placingTransition = null;
+            scenes().push(blankTransition());
+            const index = scenes().length - 1;
+            changed();
+            go("scene", { videoId: state.videoId, sceneIndex: index });
+          },
+        },
+        "+  New transition"
+      )
+    )
   );
 }
 
@@ -2681,12 +3254,17 @@ function bindChromaCanvas(video, canvas, path) {
 
 function sceneView() {
   const current = scene();
+  const transition = isTransitionScene(current);
   const { list, total } = sceneSequence(state.sceneIndex);
   const image = current.image;
   const known = image && imageExists(image);
   const bar = playerBar(total, "scene");
-  const { node: listNode, rows } = playlist(list);
+  const { node: listNode, rows } = transition
+    ? { node: null, rows: [] }
+    : playlist(list);
   if (scrubber) scrubber.rows = rows;
+  const mapSeconds = Number(current.map?.seconds);
+  const mapHold = Number.isFinite(mapSeconds) ? mapSeconds : 0;
 
   app.classList.toggle("is-expanded", state.pictureExpanded);
 
@@ -2708,7 +3286,7 @@ function sceneView() {
             class: "scene-title",
             type: "text",
             value: current.title || "",
-            placeholder: "Scene title",
+            placeholder: transition ? "Transition title" : "Scene title",
             onInput: (event) => {
               current.title = event.target.value;
               clearTimeout(saveTimer);
@@ -2717,6 +3295,45 @@ function sceneView() {
               if (crumb) crumb.textContent = event.target.value || `Scene ${state.sceneIndex + 1}`;
             },
           }),
+          h(
+            "label",
+            {
+              class: `scene-transition-toggle${transition ? " on" : ""}`,
+              title: "Map overlay between neighboring scenes — they keep their full songs",
+            },
+            h("input", {
+              type: "checkbox",
+              checked: transition,
+              onChange: (event) => {
+                const on = !!event.target.checked;
+                if (on) {
+                  const songs = (current.tracks || []).length;
+                  if (
+                    songs &&
+                    !confirm(
+                      `This scene has ${songs} song${songs === 1 ? "" : "s"}. Turning on Is transition will remove them from this scene. Continue?`
+                    )
+                  ) {
+                    event.target.checked = false;
+                    return;
+                  }
+                  current.is_transition = true;
+                  current.tracks = [];
+                  current.transition_in = current.transition_in || "fade";
+                  current.transition_out = current.transition_out || "fade";
+                  if (!current.map || typeof current.map !== "object") {
+                    current.map = { seconds: DEFAULT_MAP_SECONDS };
+                  } else if (!(Number(current.map.seconds) > 0)) {
+                    current.map.seconds = DEFAULT_MAP_SECONDS;
+                  }
+                } else {
+                  current.is_transition = false;
+                }
+                changed();
+              },
+            }),
+            h("span", { text: "Is transition" })
+          ),
           outputTag(sceneOutput(state.sceneIndex))
         ),
         sceneDetails(),
@@ -2729,17 +3346,105 @@ function sceneView() {
         animControlsDial(),
         bar,
         renderStatus(),
-        h(
-          "div",
-          { class: "sequence-head" },
-          h("span", {
-            text: list.length
-              ? `${list.length} song${list.length === 1 ? "" : "s"} over this picture`
-              : "Songs",
-          }),
-          h("span", { class: "meta", text: clock(total) })
-        ),
-        listNode
+        transition
+          ? h(
+              "div",
+              { class: "transition-panel" },
+              h(
+                "div",
+                { class: "sequence-head" },
+                h("span", { text: "Map overlay" }),
+                h("span", {
+                  class: "meta",
+                  text: mapHold > 0 ? `${clock(mapHold / 2)} each side` : "—",
+                })
+              ),
+              h("p", {
+                class: "meta transition-note",
+                text: "Visual track only — the audio track is unchanged. The map fades over the end of the previous scene and the start of the next while their songs keep playing underneath.",
+              }),
+              h(
+                "div",
+                { class: "transition-fx-row" },
+                transitionFxSelect(current.transition_in || "fade", (next) => {
+                  current.transition_in = next;
+                  changed();
+                }, "Fade in"),
+                transitionFxSelect(current.transition_out || "fade", (next) => {
+                  current.transition_out = next;
+                  changed();
+                }, "Fade out")
+              ),
+              (() => {
+                const list = scenes();
+                const prev = list[state.sceneIndex - 1];
+                const next = list[state.sceneIndex + 1];
+                const half = mapHold > 0 ? clock(mapHold / 2) : "—";
+                const rows = [
+                  prev && !prev.is_transition
+                    ? { title: `Over “${prev.title || "Previous"}” (end)`, len: half }
+                    : null,
+                  next && !next.is_transition
+                    ? { title: `Over “${next.title || "Next"}” (start)`, len: half }
+                    : null,
+                ].filter(Boolean);
+                return rows.length
+                  ? h(
+                      "ul",
+                      { class: "transition-bridge-list" },
+                      ...rows.map((item) =>
+                        h(
+                          "li",
+                          {},
+                          h("span", { text: item.title }),
+                          h("span", { class: "len", text: item.len })
+                        )
+                      )
+                    )
+                  : h("p", {
+                      class: "meta transition-note",
+                      text: "Place this between two scenes that each have songs.",
+                    });
+              })(),
+              h(
+                "label",
+                { class: "transition-map-hold" },
+                h("span", { text: "Map hold (seconds)" }),
+                h("input", {
+                  type: "number",
+                  min: "0",
+                  step: "1",
+                  value: String(mapHold),
+                  title: "Total map time across the cut — half on each neighboring scene.",
+                  onChange: (event) => {
+                    const next = Math.max(0, Number(event.target.value) || 0);
+                    if (!current.map || typeof current.map !== "object") current.map = {};
+                    current.map.seconds = next;
+                    changed();
+                  },
+                }),
+                h("span", {
+                  class: "meta",
+                  text:
+                    mapHold > 0
+                      ? `${clock(mapHold / 2)} before cut · ${clock(mapHold / 2)} after`
+                      : "No overlay",
+                })
+              )
+            )
+          : [
+              h(
+                "div",
+                { class: "sequence-head" },
+                h("span", {
+                  text: list.length
+                    ? `${list.length} song${list.length === 1 ? "" : "s"} over this picture`
+                    : "Songs",
+                }),
+                h("span", { class: "meta", text: clock(total) })
+              ),
+              listNode,
+            ]
       )
     )
   );
@@ -2879,10 +3584,11 @@ function sceneToolbar() {
       state.pruneImages = on;
       render();
     }),
-    libraryGroup("Songs", "music", state.assets.music || [], state.pruneSongs, (on) => {
-      state.pruneSongs = on;
-      render();
-    }),
+    !isTransitionScene() &&
+      libraryGroup("Songs", "music", state.assets.music || [], state.pruneSongs, (on) => {
+        state.pruneSongs = on;
+        render();
+      }),
     libraryGroup("Sounds", "sounds", state.assets.sounds || [], state.pruneSounds, (on) => {
       state.pruneSounds = on;
       render();
@@ -3286,6 +3992,7 @@ function selectUploadedForScene(kind, path) {
     return true;
   }
   if (kind === "music") {
+    if (isTransitionScene()) return false;
     toggleSceneSong(path, true);
     return true;
   }
@@ -4371,9 +5078,14 @@ window.addEventListener("keydown", (event) => {
       render();
       return;
     }
-    if (state.movingScene !== null || state.movingSong !== null) {
+    if (
+      state.movingScene !== null ||
+      state.movingSong !== null ||
+      state.placingTransition !== null
+    ) {
       state.movingScene = null;
       state.movingSong = null;
+      state.placingTransition = null;
       render();
       return;
     }
