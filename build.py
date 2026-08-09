@@ -62,6 +62,7 @@ class Segment:
     enter_style: str = "fade"  # ffmpeg xfade name when transitioning into this still
     effects: list[dict] = field(default_factory=list)
     animations: list[dict] = field(default_factory=list)
+    edits: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -84,6 +85,7 @@ class Scene:
     sounds: list[tuple[Path, float]] = field(default_factory=list)  # (path, volume 0–1)
     effects: list[dict] = field(default_factory=list)
     animations: list[dict] = field(default_factory=list)
+    edits: list[dict] = field(default_factory=list)
     audio_duration: float = 0.0
     start: float = 0.0
     track_crossfade: float = 0.0
@@ -493,6 +495,32 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                 }
             )
 
+        edits: list[dict] = []
+        for entry in raw.get("edits") or []:
+            if isinstance(entry, str):
+                entry = {"file": entry}
+            source = entry.get("file")
+            if not source:
+                continue
+            aspect = entry.get("aspect", "landscape")
+            if aspect not in ("landscape", "portrait", "native"):
+                aspect = "landscape"
+            height = entry.get("h")
+            h_val = None if height is None else float(height)
+            if h_val is not None and h_val <= 0:
+                h_val = None
+            edits.append(
+                {
+                    "path": resolve(root, source, "edit still"),
+                    "x": float(entry.get("x", 0.36)),
+                    "y": float(entry.get("y", 0.28)),
+                    "w": float(entry.get("w", 0.28)),
+                    "h": h_val,
+                    "aspect": aspect,
+                    "soft_edges": bool(entry.get("soft_edges", False)),
+                }
+            )
+
         # bridges_after is keyed by the scene before the transition (0-based).
         outgoing = bridges_after.get(index - 1)
         incoming = (
@@ -538,6 +566,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                     enter_style="fade",
                     effects=effects,
                     animations=animations,
+                    edits=[],
                 )
             )
 
@@ -556,6 +585,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                         enter_style="fade",
                         effects=effects,
                         animations=animations,
+                        edits=edits,
                     )
                 )
 
@@ -607,6 +637,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             sounds=sounds,
             effects=effects,
             animations=animations,
+            edits=edits,
             audio_duration=audio_duration,
             start=clock,
             track_crossfade=track_crossfade,
@@ -1022,7 +1053,19 @@ def build_command(
                 "-i", str(segment.image),
             ]
 
-        # Looped green-screen effects (seamless end→start fade), then animations.
+        # Still edits (static patches), then green-screen effects, then animations.
+        edit_inputs: list[tuple[int, dict, float]] = []
+        for position, segment in enumerate(segments):
+            duration = segment.hold + fade_out[position]
+            for edit in segment.edits:
+                edit_inputs.append((position, edit, duration))
+                cmd += [
+                    "-loop", "1",
+                    "-framerate", str(fps),
+                    "-t", f"{duration:.3f}",
+                    "-i", str(edit["path"]),
+                ]
+
         effect_inputs: list[tuple[int, dict, float]] = []
         for position, segment in enumerate(segments):
             duration = segment.hold + fade_out[position]
@@ -1051,7 +1094,7 @@ def build_command(
                     "-stream_loop", "-1",
                     "-i", str(looped),
                 ]
-        audio_offset = len(segments) + len(effect_inputs) + len(anim_inputs)
+        audio_offset = len(segments) + len(edit_inputs) + len(effect_inputs) + len(anim_inputs)
 
     bridge_events: list[dict] = []
     bridge_base = audio_offset
@@ -1093,8 +1136,12 @@ def build_command(
             ]
 
     if not audio_only:
-        effect_base = len(segments)
+        edit_base = len(segments)
+        effect_base = edit_base + len(edit_inputs)
         anim_base = effect_base + len(effect_inputs)
+        edit_by_segment: dict[int, list[int]] = {i: [] for i in range(len(segments))}
+        for edit_index, (segment_index, _, _) in enumerate(edit_inputs):
+            edit_by_segment[segment_index].append(edit_base + edit_index)
         effect_by_segment: dict[int, list[int]] = {i: [] for i in range(len(segments))}
         for effect_index, (segment_index, _, _) in enumerate(effect_inputs):
             effect_by_segment[segment_index].append(effect_base + effect_index)
@@ -1107,7 +1154,51 @@ def build_command(
                 f"[{position}:v]{pan_filter(segment, width, height)},fps={fps}[b{position}]"
             )
             current = f"b{position}"
-            # Animations sit under full-frame effects.
+            # Still edits sit under animations; animations sit under full-frame effects.
+            for step, input_index in enumerate(edit_by_segment[position]):
+                edit = edit_inputs[input_index - edit_base][1]
+                hold = segment.hold + fade_out[position]
+                ew = max(2, int(round(width * max(0.05, min(edit["w"], 1.0)) / 2) * 2))
+                ex = int(round(width * max(0.0, min(edit["x"], 1.0))))
+                ey = int(round(height * max(0.0, min(edit["y"], 1.0))))
+                eh = edit.get("h")
+                if eh is not None and float(eh) > 0:
+                    eh = max(2, int(round(height * max(0.05, min(float(eh), 1.0)) / 2) * 2))
+                else:
+                    aspect = edit.get("aspect", "landscape")
+                    if aspect == "portrait":
+                        eh = max(2, int(round(ew * 16 / 9 / 2) * 2))
+                    else:
+                        eh = max(2, int(round(ew * 9 / 16 / 2) * 2))
+                en = f"ed{position}x{step}"
+                out = f"e{position}x{step}"
+                scale = (
+                    f"scale={ew}:{eh}:force_original_aspect_ratio=increase:flags=lanczos,"
+                    f"crop={ew}:{eh},setsar=1"
+                )
+                if edit.get("soft_edges"):
+                    edge = (
+                        "format=rgba,"
+                        "geq="
+                        "r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
+                        "a='min(min(255*min(X\\,W-1-X)/(0.12*W)\\,"
+                        "255*min(Y\\,H-1-Y)/(0.12*H))\\,255)'"
+                    )
+                    pix = edge
+                else:
+                    pix = "format=yuv420p"
+                graph.append(
+                    f"[{input_index}:v]fps={fps},"
+                    f"trim=duration={hold:.3f},setpts=PTS-STARTPTS,"
+                    f"{scale},"
+                    f"{pix}[{en}]"
+                )
+                graph.append(
+                    f"[{current}][{en}]overlay="
+                    f"x='min({ex}\\,main_w-overlay_w)':y='min({ey}\\,main_h-overlay_h)':"
+                    f"shortest=1:format=auto[{out}]"
+                )
+                current = out
             for step, input_index in enumerate(anim_by_segment[position]):
                 anim = anim_inputs[input_index - anim_base][1]
                 hold = segment.hold + fade_out[position]

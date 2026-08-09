@@ -7,6 +7,7 @@ const state = {
   script: null,
   assets: { images: [], music: [], sounds: [], effects: [], animations: [] },
   selectedAnim: null,
+  selectedEdit: null,
   selectedOverlay: null, // "credit" | "now_playing" | null
   outputs: { video: { ready: false }, scenes: {} },
   render: { status: "idle", percent: 0, ready: false },
@@ -23,7 +24,8 @@ const state = {
   pruneAnims: false,
   renamingPath: null,
   pictureExpanded: false,
-  regionTool: false,
+  regionTool: false, // draw animation slot
+  editTool: false, // draw still-edit slot
   regionAspect: "landscape", // landscape = 16:9, portrait = 9:16
   detailsDirty: false,
   detailsOpen: false,
@@ -179,8 +181,11 @@ async function applyRoute() {
   state.movingScene = null;
   state.movingSong = null;
   state.selectedAnim = null;
+  state.selectedEdit = null;
   state.selectedOverlay = null;
   state.pictureExpanded = false;
+  state.regionTool = false;
+  state.editTool = false;
   overlayUi = null;
 
   if (route.page === "landing") {
@@ -758,7 +763,40 @@ function isTransitionScene(entry = scene()) {
 
 const sceneEffects = (index = state.sceneIndex) => (scene(index).effects ||= []);
 const sceneAnims = (index = state.sceneIndex) => (scene(index).animations ||= []);
+const sceneEdits = (index = state.sceneIndex) => (scene(index).edits ||= []);
 const sceneSounds = (index = state.sceneIndex) => (scene(index).sounds ||= []);
+
+function normalizeEdit(entry) {
+  if (typeof entry === "string") {
+    return {
+      file: entry,
+      x: 0.36,
+      y: 0.28,
+      w: 0.28,
+      h: null,
+      aspect: "landscape",
+      soft_edges: false,
+      locked: false,
+    };
+  }
+  const aspect =
+    entry?.aspect === "portrait" || entry?.aspect === "landscape" ? entry.aspect : "landscape";
+  const height = Number(entry?.h);
+  return {
+    file: entry?.file || "",
+    x: Number.isFinite(entry?.x) ? entry.x : 0.36,
+    y: Number.isFinite(entry?.y) ? entry.y : 0.28,
+    w: Number.isFinite(entry?.w) ? entry.w : 0.28,
+    h: Number.isFinite(height) && height > 0 ? Math.min(1, height) : null,
+    aspect,
+    soft_edges: !!entry?.soft_edges,
+    locked: !!entry?.locked,
+  };
+}
+
+function isPendingEdit(entry) {
+  return !normalizeEdit(entry).file;
+}
 
 function normalizeSound(entry) {
   if (typeof entry === "string") return { file: entry, volume: 55 };
@@ -912,6 +950,24 @@ function regionIcon() {
   );
 }
 
+function editIcon() {
+  return h(
+    "svg",
+    {
+      class: "icon",
+      viewBox: "0 0 16 16",
+      width: "14",
+      height: "14",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.5",
+      "aria-hidden": true,
+    },
+    h("path", { d: "M9.5 3.5l3 3L6 13H3v-3l6.5-6.5z" }),
+    h("path", { d: "M8.5 4.5l3 3" })
+  );
+}
+
 function loadImageElement(url) {
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -921,41 +977,39 @@ function loadImageElement(url) {
   });
 }
 
-function animCropNorm(entry, video = null) {
-  const normalized = normalizeAnim(entry);
-  let height = normalized.h;
+function regionCropNorm(entry, video = null) {
+  let height = entry.h;
   if (!(Number.isFinite(height) && height > 0)) {
     let ratio = null;
     if (video?.videoWidth && video?.videoHeight) ratio = video.videoWidth / video.videoHeight;
-    else if (normalized.aspect === "landscape") ratio = 16 / 9;
-    else if (normalized.aspect === "portrait") ratio = 9 / 16;
+    else if (entry.aspect === "landscape") ratio = 16 / 9;
+    else if (entry.aspect === "portrait") ratio = 9 / 16;
     // Picture is 3:2: h = (w * picW / ratio) / picH = w * (3/2) / ratio
-    if (ratio) height = (normalized.w * 1.5) / ratio;
+    if (ratio) height = (entry.w * 1.5) / ratio;
   }
-  if (!(Number.isFinite(height) && height > 0)) height = normalized.w * 0.75;
+  if (!(Number.isFinite(height) && height > 0)) height = entry.w * 0.75;
   return {
-    x: Math.min(1, Math.max(0, normalized.x)),
-    y: Math.min(1, Math.max(0, normalized.y)),
-    w: Math.min(1 - normalized.x, Math.max(0.01, normalized.w)),
-    h: Math.min(1 - normalized.y, Math.max(0.01, height)),
+    x: Math.min(1, Math.max(0, entry.x)),
+    y: Math.min(1, Math.max(0, entry.y)),
+    w: Math.min(1 - entry.x, Math.max(0.01, entry.w)),
+    h: Math.min(1 - entry.y, Math.max(0.01, height)),
   };
 }
 
-async function exportAnimRegionStill(index, { clipboard = true } = {}) {
-  const list = sceneAnims();
-  if (index == null || index < 0 || index >= list.length) return;
-  const entry = normalizeAnim(list[index]);
-  list[index] = entry;
+function animCropNorm(entry, video = null) {
+  return regionCropNorm(normalizeAnim(entry), video);
+}
 
+async function exportRegionStill(entry, { clipboard = true, label = "region" } = {}) {
   const imagePath = scene()?.image;
   if (!imagePath || !imageExists(imagePath)) {
     state.note = "No scene image to crop";
     render();
-    return;
+    return false;
   }
   try {
     const image = await loadImageElement(`/${imagePath}`);
-    const box = animCropNorm(entry);
+    const box = regionCropNorm(entry);
     const sx = Math.round(box.x * image.naturalWidth);
     const sy = Math.round(box.y * image.naturalHeight);
     const sw = Math.max(1, Math.round(box.w * image.naturalWidth));
@@ -969,7 +1023,7 @@ async function exportAnimRegionStill(index, { clipboard = true } = {}) {
     if (!blob) throw new Error("Could not export crop");
 
     const stem = baseName(imagePath) || "scene";
-    const name = `${stem}-region-${Math.round(box.x * 100)}-${Math.round(box.y * 100)}.png`;
+    const name = `${stem}-${label}-${Math.round(box.x * 100)}-${Math.round(box.y * 100)}.png`;
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -988,9 +1042,131 @@ async function exportAnimRegionStill(index, { clipboard = true } = {}) {
     } else {
       state.note = "Downloaded and locked — drag/resize disabled for this slot";
     }
-    changed();
+    return true;
   } catch (error) {
     state.note = error.message || "Could not export region";
+    render();
+    return false;
+  }
+}
+
+async function exportAnimRegionStill(index, { clipboard = true } = {}) {
+  const list = sceneAnims();
+  if (index == null || index < 0 || index >= list.length) return;
+  const entry = normalizeAnim(list[index]);
+  list[index] = entry;
+  if (await exportRegionStill(entry, { clipboard, label: "region" })) changed();
+}
+
+async function exportEditRegionStill(index, { clipboard = true } = {}) {
+  const list = sceneEdits();
+  if (index == null || index < 0 || index >= list.length) return;
+  const entry = normalizeEdit(list[index]);
+  list[index] = entry;
+  if (await exportRegionStill(entry, { clipboard, label: "edit" })) changed();
+}
+
+function filledSceneEdits(index = state.sceneIndex) {
+  return sceneEdits(index)
+    .map((entry) => normalizeEdit(entry))
+    .filter((entry) => entry.file);
+}
+
+/** Draw image into a rect with object-fit: cover. */
+function drawImageCover(ctx, image, dx, dy, dw, dh) {
+  const iw = image.naturalWidth || image.width;
+  const ih = image.naturalHeight || image.height;
+  if (!(iw > 0 && ih > 0 && dw > 0 && dh > 0)) return;
+  const ir = iw / ih;
+  const br = dw / dh;
+  let sx = 0;
+  let sy = 0;
+  let sw = iw;
+  let sh = ih;
+  if (ir > br) {
+    sw = ih * br;
+    sx = (iw - sw) / 2;
+  } else {
+    sh = iw / br;
+    sy = (ih - sh) / 2;
+  }
+  ctx.drawImage(image, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+
+function featherEditPatch(patch, dw, dh) {
+  const canvas = document.createElement("canvas");
+  canvas.width = dw;
+  canvas.height = dh;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(patch, 0, 0, dw, dh);
+  const edge = Math.max(2, Math.round(Math.min(dw, dh) * 0.12));
+  const image = ctx.getImageData(0, 0, dw, dh);
+  const data = image.data;
+  for (let y = 0; y < dh; y += 1) {
+    for (let x = 0; x < dw; x += 1) {
+      const dist = Math.min(x, y, dw - 1 - x, dh - 1 - y);
+      if (dist >= edge) continue;
+      const alpha = dist / edge;
+      const i = (y * dw + x) * 4 + 3;
+      data[i] = Math.round(data[i] * alpha);
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  return canvas;
+}
+
+async function composeFusedSceneCanvas() {
+  const imagePath = scene()?.image;
+  if (!imagePath || !imageExists(imagePath)) {
+    throw new Error("No scene image to fuse");
+  }
+  const edits = filledSceneEdits();
+  if (!edits.length) throw new Error("No filled edits to fuse");
+
+  const base = await loadImageElement(`/${imagePath}`);
+  const canvas = document.createElement("canvas");
+  canvas.width = base.naturalWidth;
+  canvas.height = base.naturalHeight;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(base, 0, 0);
+
+  for (const edit of edits) {
+    const patch = await loadImageElement(`/${edit.file}`);
+    const box = regionCropNorm(edit);
+    const dx = Math.round(box.x * canvas.width);
+    const dy = Math.round(box.y * canvas.height);
+    const dw = Math.max(1, Math.round(box.w * canvas.width));
+    const dh = Math.max(1, Math.round(box.h * canvas.height));
+    const temp = document.createElement("canvas");
+    temp.width = dw;
+    temp.height = dh;
+    const tctx = temp.getContext("2d");
+    drawImageCover(tctx, patch, 0, 0, dw, dh);
+    const stamped = edit.soft_edges ? featherEditPatch(temp, dw, dh) : temp;
+    ctx.drawImage(stamped, dx, dy);
+  }
+  return canvas;
+}
+
+async function fuseEditsAndDownload() {
+  try {
+    state.note = "Fusing edits…";
+    render();
+    const canvas = await composeFusedSceneCanvas();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) throw new Error("Could not build fused image");
+    const stem = baseName(scene().image) || "scene";
+    const name = `${stem}-fused.png`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+    URL.revokeObjectURL(url);
+    state.note = `Downloaded ${name} — scene file unchanged. Compare, then we can overwrite later.`;
+    render();
+  } catch (error) {
+    state.note = error.message || "Could not fuse edits";
     render();
   }
 }
@@ -1037,7 +1213,7 @@ function fitRegionBox(x0, y0, x1, y1, aspect = state.regionAspect) {
   };
 }
 
-function applyAnimAspect(entry, aspect) {
+function applyRegionAspect(entry, aspect) {
   if (entry.locked) return;
   const next = aspect === "portrait" ? "portrait" : "landscape";
   entry.aspect = next;
@@ -1054,6 +1230,14 @@ function applyAnimAspect(entry, aspect) {
   entry.h = h;
   entry.x = Math.min(1 - w, Math.max(0, cx - w / 2));
   entry.y = Math.min(1 - h, Math.max(0, cy - h / 2));
+}
+
+function applyAnimAspect(entry, aspect) {
+  applyRegionAspect(entry, aspect);
+}
+
+function applyEditAspect(entry, aspect) {
+  applyRegionAspect(entry, aspect);
 }
 
 function regionAspectToggle(current, onPick) {
@@ -1141,9 +1325,75 @@ function beginRegionDraw(event) {
     });
     list.push(slot);
     state.selectedAnim = list.length - 1;
+    state.selectedEdit = null;
     state.regionTool = false;
+    state.editTool = false;
     state.note =
       "Region saved — Copy still for Jim. Select this slot, then add the animated clip to fill it.";
+    changed();
+  };
+  surface.addEventListener("pointermove", move);
+  surface.addEventListener("pointerup", up);
+  surface.addEventListener("pointercancel", up);
+}
+
+function beginEditDraw(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const surface = event.currentTarget;
+  const picture = surface.closest(".picture");
+  if (!picture) return;
+  const box = picture.getBoundingClientRect();
+  const startX = Math.min(1, Math.max(0, (event.clientX - box.left) / box.width));
+  const startY = Math.min(1, Math.max(0, (event.clientY - box.top) / box.height));
+  const marquee = h("div", { class: "region-marquee is-edit" });
+  picture.append(marquee);
+  const aspect = state.regionAspect === "portrait" ? "portrait" : "landscape";
+
+  const paint = (rect) => {
+    marquee.style.left = `${rect.x * 100}%`;
+    marquee.style.top = `${rect.y * 100}%`;
+    marquee.style.width = `${rect.w * 100}%`;
+    marquee.style.height = `${rect.h * 100}%`;
+    return rect;
+  };
+  paint({ x: startX, y: startY, w: 0, h: 0 });
+
+  surface.setPointerCapture(event.pointerId);
+  let last = { x: startX, y: startY, w: 0, h: 0 };
+  const move = (moveEvent) => {
+    const x = Math.min(1, Math.max(0, (moveEvent.clientX - box.left) / box.width));
+    const y = Math.min(1, Math.max(0, (moveEvent.clientY - box.top) / box.height));
+    last = paint(fitRegionBox(startX, startY, x, y, aspect));
+  };
+  const up = () => {
+    surface.releasePointerCapture(event.pointerId);
+    surface.removeEventListener("pointermove", move);
+    surface.removeEventListener("pointerup", up);
+    surface.removeEventListener("pointercancel", up);
+    marquee.remove();
+    if (last.w < 0.04 || last.h < 0.04) {
+      state.note = "Draw a larger region";
+      render();
+      return;
+    }
+    const list = sceneEdits();
+    const slot = normalizeEdit({
+      file: "",
+      x: last.x,
+      y: last.y,
+      w: last.w,
+      h: last.h,
+      soft_edges: false,
+      aspect,
+    });
+    list.push(slot);
+    state.selectedEdit = list.length - 1;
+    state.selectedAnim = null;
+    state.editTool = false;
+    state.regionTool = false;
+    state.note =
+      "Edit region saved — Copy still, adjust in your model, then paste or upload to lock it in.";
     changed();
   };
   surface.addEventListener("pointermove", move);
@@ -3006,6 +3256,31 @@ function overlayToggles() {
   );
 }
 
+/** Read-only still-edit layer for the video-page preview. */
+function previewEditLayer(entry) {
+  const normalized = normalizeEdit(entry);
+  if (!normalized.file) return null;
+  if (!(state.assets.images || []).some((item) => item.path === normalized.file)) {
+    // Still may not be in the images scan yet — show if path looks like an image.
+    if (!/\.(png|jpe?g|webp|gif)$/i.test(normalized.file)) return null;
+  }
+  const soft = normalized.soft_edges ? " soft-edges" : "";
+  return h(
+    "div",
+    {
+      class: `edit-layer anim-layer is-preview is-edit aspect-${normalized.aspect || "landscape"}`,
+      style: animLayerStyle(normalized),
+      "aria-hidden": "true",
+    },
+    h("img", {
+      class: `edit-still${soft}`,
+      src: `/${normalized.file}`,
+      alt: "",
+      draggable: false,
+    })
+  );
+}
+
 /** Read-only animation layer for the video-page preview (no drag chrome). */
 function previewAnimLayer(entry) {
   const normalized = normalizeAnim(entry);
@@ -3081,6 +3356,11 @@ function syncVideoPreviewMotion(at = player.at) {
 
   const entry = scenes()[index];
   if (!entry || entry.is_transition) return;
+
+  (entry.edits || []).forEach((edit) => {
+    const layer = previewEditLayer(edit);
+    if (layer) overlayUi.motion.append(layer);
+  });
 
   (entry.animations || []).forEach((anim) => {
     const layer = previewAnimLayer(anim);
@@ -3628,6 +3908,8 @@ function downloadIcon() {
 function pictureStage(known, image) {
   const expanded = state.pictureExpanded;
   const regionOn = expanded && state.regionTool;
+  const editOn = expanded && state.editTool;
+  const drawOn = regionOn || editOn;
   return h(
     "div",
     { class: `picture-frame${expanded ? " is-expanded" : ""}` },
@@ -3656,11 +3938,12 @@ function pictureStage(known, image) {
           {
             class: `picture-region${regionOn ? " on" : ""}`,
             type: "button",
-            title: regionOn ? "Cancel region tool" : "Draw a 16:9 or 9:16 region to clone",
-            "aria-label": regionOn ? "Cancel region tool" : "Draw region",
+            title: regionOn ? "Cancel region tool" : "Draw a 16:9 or 9:16 region for animation",
+            "aria-label": regionOn ? "Cancel region tool" : "Draw animation region",
             onClick: (event) => {
               event.stopPropagation();
               state.regionTool = !state.regionTool;
+              if (state.regionTool) state.editTool = false;
               state.note = state.regionTool
                 ? `Draw a ${state.regionAspect === "portrait" ? "9:16" : "16:9"} region for Jim`
                 : "";
@@ -3669,10 +3952,30 @@ function pictureStage(known, image) {
           },
           regionIcon()
         ),
-        regionOn &&
+        h(
+          "button",
+          {
+            class: `picture-region picture-edit${editOn ? " on" : ""}`,
+            type: "button",
+            title: editOn ? "Cancel edit tool" : "Draw a region to edit as a still",
+            "aria-label": editOn ? "Cancel edit tool" : "Draw edit region",
+            onClick: (event) => {
+              event.stopPropagation();
+              state.editTool = !state.editTool;
+              if (state.editTool) state.regionTool = false;
+              state.note = state.editTool
+                ? `Draw a ${state.regionAspect === "portrait" ? "9:16" : "16:9"} region to edit`
+                : "";
+              render();
+            },
+          },
+          editIcon()
+        ),
+        drawOn &&
           regionAspectToggle(state.regionAspect, (aspect) => {
             state.regionAspect = aspect;
-            state.note = `Draw a ${aspect === "portrait" ? "9:16" : "16:9"} region for Jim`;
+            const kind = editOn ? "region to edit" : "region for Jim";
+            state.note = `Draw a ${aspect === "portrait" ? "9:16" : "16:9"} ${kind}`;
             render();
           })
       ),
@@ -3686,7 +3989,10 @@ function pictureStage(known, image) {
         onClick: (event) => {
           event.stopPropagation();
           state.pictureExpanded = !state.pictureExpanded;
-          if (!state.pictureExpanded) state.regionTool = false;
+          if (!state.pictureExpanded) {
+            state.regionTool = false;
+            state.editTool = false;
+          }
           render();
         },
       },
@@ -3695,16 +4001,19 @@ function pictureStage(known, image) {
     h(
       "div",
       {
-        class: `picture${known ? "" : " blank"}${regionOn ? " region-mode" : ""}`,
+        class: `picture${known ? "" : " blank"}${drawOn ? " region-mode" : ""}${
+          editOn ? " edit-mode" : ""
+        }`,
         onPointerdown: (event) => {
           if (
             event.target.closest(
-              ".anim-layer, .fade-zoom-guide, .picture-expand, .picture-download, .picture-region-tools, .region-capture"
+              ".anim-layer, .edit-layer, .fade-zoom-guide, .picture-expand, .picture-download, .picture-region-tools, .region-capture"
             )
           )
             return;
-          if (state.selectedAnim !== null) {
+          if (state.selectedAnim !== null || state.selectedEdit !== null) {
             state.selectedAnim = null;
+            state.selectedEdit = null;
             render();
           }
         },
@@ -3723,17 +4032,19 @@ function pictureStage(known, image) {
       isTransitionScene() &&
         transitionStyleOf(scene()) === "fade_zoom" &&
         fadeZoomGuide("end"),
+      // Still edits sit under animation overlays.
+      ...sceneEdits().map((entry, index) => editLayer(normalizeEdit(entry), index)),
       ...sceneAnims().map((entry, index) => animLayer(normalizeAnim(entry), index)),
       // Effects sit above animation overlays.
       ...sceneEffects()
         .map((entry) => normalizeEffect(entry))
         .filter((entry) => state.assets.effects.some((effect) => effect.path === entry.file))
         .map((entry) => effectLayer(entry.file, entry.speed)),
-      regionOn &&
+      drawOn &&
         h("div", {
           class: "region-capture",
-          title: "Drag to draw a region",
-          onPointerdown: beginRegionDraw,
+          title: editOn ? "Drag to draw an edit region" : "Drag to draw a region",
+          onPointerdown: editOn ? beginEditDraw : beginRegionDraw,
         })
     )
   );
@@ -3776,9 +4087,14 @@ function beginOverlayMove(event, kind) {
   const entry = kind === "credit" ? overlays.credit : overlays.now_playing;
   const picture = event.currentTarget.closest(".picture");
   const layer = event.currentTarget;
-  if (state.selectedOverlay !== kind || state.selectedAnim !== null) {
+  if (
+    state.selectedOverlay !== kind ||
+    state.selectedAnim !== null ||
+    state.selectedEdit !== null
+  ) {
     state.selectedOverlay = kind;
     state.selectedAnim = null;
+    state.selectedEdit = null;
     layer.classList.add("selected");
   }
   const box = picture.getBoundingClientRect();
@@ -4006,12 +4322,29 @@ function sceneView() {
           outputTag(sceneOutput(state.sceneIndex))
         ),
         sceneDetails(),
+        filledSceneEdits().length > 0 &&
+          h(
+            "div",
+            { class: "fuse-bar" },
+            h("button", {
+              class: "btn",
+              type: "button",
+              text: "Fuse edits",
+              title: "Bake filled edits into a new PNG download (does not overwrite the scene image)",
+              onClick: () => fuseEditsAndDownload(),
+            }),
+            h("span", {
+              class: "meta",
+              text: "Downloads a fused still — original file stays put for now.",
+            })
+          ),
         pictureStage(known, image),
-        sceneAnims().length > 0 &&
+        (sceneAnims().length > 0 || sceneEdits().length > 0) &&
           h("p", {
             class: "anim-lock-note",
             text: "Expand the picture to drag or resize. Copy still locks the slot in place.",
           }),
+        editControlsDial(),
         animControlsDial(),
         bar,
         renderStatus(),
@@ -4420,9 +4753,43 @@ function fillAnimSlot(path) {
   slot.file = path;
   list[index] = slot;
   state.selectedAnim = index;
+  state.selectedEdit = null;
   state.note = "Animation snapped into the region";
   changed();
   return true;
+}
+
+function fillEditSlot(path, { replace = false } = {}) {
+  if (!path) return false;
+  const list = sceneEdits();
+  let index = state.selectedEdit;
+  if (index === null || index < 0 || index >= list.length) {
+    index = list.findIndex((entry) => isPendingEdit(entry));
+  } else if (!replace && !isPendingEdit(list[index])) {
+    index = list.findIndex((entry) => isPendingEdit(entry));
+  }
+  if (index < 0) return false;
+  const slot = normalizeEdit(list[index]);
+  slot.file = path;
+  slot.locked = true;
+  list[index] = slot;
+  state.selectedEdit = index;
+  state.selectedAnim = null;
+  state.note = "Edited still locked into the region";
+  changed();
+  return true;
+}
+
+function pickImageForScene(path) {
+  if (
+    state.selectedEdit !== null &&
+    state.selectedEdit >= 0 &&
+    state.selectedEdit < sceneEdits().length
+  ) {
+    if (fillEditSlot(path, { replace: true })) return;
+  }
+  scene().image = path;
+  changed();
 }
 
 function toggleSceneAnim(path, on) {
@@ -4463,6 +4830,11 @@ function libraryItem(kind, item, pruning) {
 
   if (kind === "images") {
     const on = scene().image === item.path;
+    const editTarget =
+      state.selectedEdit !== null &&
+      state.selectedEdit < sceneEdits().length &&
+      (isPendingEdit(sceneEdits()[state.selectedEdit]) ||
+        !!normalizeEdit(sceneEdits()[state.selectedEdit]).file);
     return h(
       "div",
       { class: `media-row${on ? " current" : ""}${pruning ? " pruning" : ""}` },
@@ -4472,20 +4844,16 @@ function libraryItem(kind, item, pruning) {
         name: "scene-image",
         checked: on,
         disabled: pruning || renaming,
-        title: "Use this picture",
-        onChange: () => {
-          scene().image = item.path;
-          changed();
-        },
+        title: editTarget ? "Place into the selected edit slot" : "Use this picture",
+        onChange: () => pickImageForScene(item.path),
       }),
       h("span", {
         class: "media-thumb",
-        title: item.path,
+        title: editTarget ? "Place into the selected edit slot" : item.path,
         style: { backgroundImage: `url(/thumb?path=${encodeURIComponent(item.path)}&w=120)` },
         onClick: () => {
           if (pruning || renaming) return;
-          scene().image = item.path;
-          changed();
+          pickImageForScene(item.path);
         },
       }),
       renameField(item, pruning),
@@ -4632,6 +5000,7 @@ function rewriteLocalAssetPath(from, to) {
     if (Array.isArray(entry.tracks)) entry.tracks = entry.tracks.map(rewriteEntry);
     if (Array.isArray(entry.sounds)) entry.sounds = entry.sounds.map(rewriteEntry);
     if (Array.isArray(entry.animations)) entry.animations = entry.animations.map(rewriteEntry);
+    if (Array.isArray(entry.edits)) entry.edits = entry.edits.map(rewriteEntry);
     if (Array.isArray(entry.effects)) entry.effects = entry.effects.map(rewriteEntry);
   }
 }
@@ -4639,8 +5008,7 @@ function rewriteLocalAssetPath(from, to) {
 function selectUploadedForScene(kind, path) {
   if (!path || state.page !== "scene") return false;
   if (kind === "images") {
-    scene().image = path;
-    changed();
+    pickImageForScene(path);
     return true;
   }
   if (kind === "music") {
@@ -4722,10 +5090,20 @@ async function deleteAsset(path) {
         return file !== path;
       });
       if ((entry.animations || []).length !== beforeAnims) dirty = true;
+
+      const beforeEdits = (entry.edits || []).length;
+      entry.edits = (entry.edits || []).filter((edit) => {
+        const file = typeof edit === "string" ? edit : edit?.file;
+        return file !== path;
+      });
+      if ((entry.edits || []).length !== beforeEdits) dirty = true;
     }
 
     if (state.selectedAnim !== null && state.selectedAnim >= sceneAnims().length) {
       state.selectedAnim = null;
+    }
+    if (state.selectedEdit !== null && state.selectedEdit >= sceneEdits().length) {
+      state.selectedEdit = null;
     }
 
     await refreshOutputs();
@@ -4749,8 +5127,14 @@ function muteVideo(video) {
 }
 
 function selectAnim(index) {
-  if (state.selectedAnim === index && state.selectedOverlay === null) return;
+  if (
+    state.selectedAnim === index &&
+    state.selectedOverlay === null &&
+    state.selectedEdit === null
+  )
+    return;
   state.selectedAnim = index;
+  state.selectedEdit = null;
   state.selectedOverlay = null;
   render();
 }
@@ -4909,6 +5293,325 @@ function animLayer(entry, index) {
   if (primary.readyState >= 1) applyNativeAspect();
 
   return layer;
+}
+
+function selectEdit(index) {
+  if (
+    state.selectedEdit === index &&
+    state.selectedOverlay === null &&
+    state.selectedAnim === null
+  )
+    return;
+  state.selectedEdit = index;
+  state.selectedAnim = null;
+  state.selectedOverlay = null;
+  render();
+}
+
+function editCanDrag(entry) {
+  return state.pictureExpanded && !entry?.locked;
+}
+
+function editChrome(index, entry) {
+  const selected = state.selectedEdit === index;
+  const locked = !!entry.locked;
+  const canDrag = editCanDrag(entry);
+  return [
+    selected &&
+      h(
+        "button",
+        {
+          class: "anim-copy",
+          type: "button",
+          title: locked
+            ? "Copy still again (already locked)"
+            : "Copy still — locks position",
+          onClick: (event) => {
+            event.stopPropagation();
+            exportEditRegionStill(index);
+          },
+        },
+        downloadIcon()
+      ),
+    selected && h("div", { class: "anim-mark", "aria-hidden": "true" }),
+    selected &&
+      h("button", {
+        class: "anim-remove",
+        type: "button",
+        title: "Remove",
+        text: "×",
+        onClick: (event) => {
+          event.stopPropagation();
+          sceneEdits().splice(index, 1);
+          state.selectedEdit = null;
+          changed();
+        },
+      }),
+    selected &&
+      canDrag &&
+      h("div", {
+        class: "anim-handle",
+        title: "Resize",
+        onPointerdown: (event) => beginEditResize(event, index),
+      }),
+  ];
+}
+
+function editLayerPointer(event, index, entry) {
+  if (event.target.closest(".anim-handle, .anim-remove, .anim-copy, .anim-mark")) return;
+  if (!editCanDrag(entry)) {
+    event.stopPropagation();
+    selectEdit(index);
+    return;
+  }
+  beginEditMove(event, index);
+}
+
+function editLayer(entry, index) {
+  const normalized = normalizeEdit(entry);
+  sceneEdits()[index] = normalized;
+  const selected = state.selectedEdit === index;
+  const pending = !normalized.file;
+  const locked = !!normalized.locked;
+  const canDrag = editCanDrag(normalized);
+  const soft = normalized.soft_edges ? " soft-edges" : "";
+
+  if (pending) {
+    return h(
+      "div",
+      {
+        class: `edit-layer anim-layer is-pending is-edit${selected ? " selected" : ""}${
+          locked ? " is-locked" : ""
+        }${canDrag ? " can-drag" : ""}`,
+        style: animLayerStyle(normalized),
+        title: locked
+          ? "Locked — paste or upload the edited still"
+          : canDrag
+            ? "Drag to move, or Copy still to lock"
+            : "Expand the picture to drag or resize",
+        onPointerdown: (event) => editLayerPointer(event, index, normalized),
+      },
+      h("div", { class: "anim-pending-fill", "aria-hidden": "true" }),
+      h("span", { class: "anim-pending-label", text: locked ? "Paste still" : "Edit" }),
+      ...editChrome(index, normalized)
+    );
+  }
+
+  return h(
+    "div",
+    {
+      class: `edit-layer anim-layer is-edit aspect-${normalized.aspect || "landscape"}${
+        selected ? " selected" : ""
+      }${locked ? " is-locked" : ""}${canDrag ? " can-drag" : ""}`,
+      style: animLayerStyle(normalized),
+      title: locked
+        ? "Locked — click to select"
+        : canDrag
+          ? "Drag to move"
+          : "Expand the picture to drag or resize",
+      onPointerdown: (event) => editLayerPointer(event, index, normalized),
+    },
+    h("img", {
+      class: `edit-still${soft}`,
+      src: `/${normalized.file}`,
+      alt: "",
+      draggable: false,
+    }),
+    ...editChrome(index, normalized)
+  );
+}
+
+function editControlsDial() {
+  if (state.selectedEdit === null) return null;
+  const list = sceneEdits();
+  if (state.selectedEdit >= list.length) return null;
+  const entry = normalizeEdit(list[state.selectedEdit]);
+  list[state.selectedEdit] = entry;
+  const index = state.selectedEdit;
+  const aspect = entry.aspect === "portrait" ? "portrait" : "landscape";
+  const fileInput = h("input", {
+    class: "sr-only",
+    type: "file",
+    accept: "image/png,image/jpeg,image/webp,image/gif",
+    onChange: async (event) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (file) await uploadEditStill(file, index);
+    },
+  });
+
+  return h(
+    "div",
+    { class: "anim-dials pending-hint edit-dials" },
+    !entry.locked &&
+      regionAspectToggle(aspect, (next) => {
+        applyEditAspect(entry, next);
+        state.regionAspect = next;
+        changed();
+      }),
+    h("button", {
+      class: "btn primary",
+      type: "button",
+      text: entry.locked ? "Copy again" : "Copy still",
+      title: entry.locked
+        ? "Copy the still again (slot stays locked)"
+        : "Download and copy — locks this slot",
+      onClick: () => exportEditRegionStill(index),
+    }),
+    h("button", {
+      class: "btn",
+      type: "button",
+      text: entry.file ? "Replace still" : "Upload still",
+      title: "Upload the adjusted frame into this slot",
+      onClick: () => fileInput.click(),
+    }),
+    fileInput,
+    h(
+      "label",
+      { class: `anim-check${entry.soft_edges ? " on" : ""}` },
+      h("input", {
+        type: "checkbox",
+        checked: entry.soft_edges,
+        onChange: () => {
+          entry.soft_edges = !entry.soft_edges;
+          changed();
+        },
+      }),
+      h("span", { text: "Fade edges" })
+    ),
+    h("span", {
+      class: "meta",
+      text: entry.file
+        ? "Still locked in. Paste or upload again to replace it."
+        : entry.locked
+          ? "Locked. Paste (⌘V) or upload the adjusted still — it snaps here."
+          : state.pictureExpanded
+            ? "Drag or resize, Copy still to lock, then paste the edited frame back."
+            : "Expand the picture to drag or resize, then Copy still to lock.",
+    })
+  );
+}
+
+async function uploadEditStill(file, index = state.selectedEdit) {
+  if (!file || index == null) return;
+  state.selectedEdit = index;
+  state.note = `Uploading ${file.name}…`;
+  render();
+  try {
+    const stem = (scene()?.image ? baseName(scene().image) : "edit") || "edit";
+    const ext = (file.name.match(/\.[^.]+$/) || [".png"])[0].toLowerCase();
+    const name = `${stem}-edit-${Date.now()}${ext}`;
+    const response = await fetch(
+      `/api/asset?kind=${encodeURIComponent("images")}&name=${encodeURIComponent(name)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      }
+    );
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Upload failed");
+    await refreshOutputs();
+    if (!fillEditSlot(data.path, { replace: true })) {
+      state.note = "Uploaded, but no edit slot was selected";
+      render();
+    }
+  } catch (error) {
+    state.note = error.message || "Upload failed";
+    render();
+  }
+}
+
+async function pasteEditStill(file) {
+  if (!file || state.page !== "scene") return false;
+  if (state.selectedEdit === null || state.selectedEdit >= sceneEdits().length) {
+    const pending = sceneEdits().findIndex((entry) => isPendingEdit(entry));
+    if (pending < 0) return false;
+    state.selectedEdit = pending;
+  }
+  await uploadEditStill(file, state.selectedEdit);
+  return true;
+}
+
+function beginEditMove(event, index) {
+  event.preventDefault();
+  event.stopPropagation();
+  const picture = event.currentTarget.closest(".picture");
+  const layer = event.currentTarget;
+  const entry = normalizeEdit(sceneEdits()[index]);
+  sceneEdits()[index] = entry;
+  if (!editCanDrag(entry)) {
+    selectEdit(index);
+    return;
+  }
+  if (state.selectedEdit !== index || state.selectedAnim !== null) {
+    state.selectedEdit = index;
+    state.selectedAnim = null;
+    state.selectedOverlay = null;
+    layer.classList.add("selected");
+  }
+  const box = picture.getBoundingClientRect();
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const originX = entry.x;
+  const originY = entry.y;
+
+  layer.setPointerCapture(event.pointerId);
+  const move = (moveEvent) => {
+    entry.x = Math.min(1 - entry.w, Math.max(0, originX + (moveEvent.clientX - startX) / box.width));
+    entry.y = Math.min(0.92, Math.max(0, originY + (moveEvent.clientY - startY) / box.height));
+    layer.style.left = `${entry.x * 100}%`;
+    layer.style.top = `${entry.y * 100}%`;
+  };
+  const up = () => {
+    layer.releasePointerCapture(event.pointerId);
+    layer.removeEventListener("pointermove", move);
+    layer.removeEventListener("pointerup", up);
+    layer.removeEventListener("pointercancel", up);
+    state.selectedEdit = index;
+    changed();
+  };
+  layer.addEventListener("pointermove", move);
+  layer.addEventListener("pointerup", up);
+  layer.addEventListener("pointercancel", up);
+}
+
+function beginEditResize(event, index) {
+  event.preventDefault();
+  event.stopPropagation();
+  const handle = event.currentTarget;
+  const layer = handle.closest(".edit-layer");
+  const picture = layer.closest(".picture");
+  const entry = normalizeEdit(sceneEdits()[index]);
+  sceneEdits()[index] = entry;
+  if (!editCanDrag(entry)) return;
+  const box = picture.getBoundingClientRect();
+  const startX = event.clientX;
+  const originW = entry.w;
+  const originH = entry.h;
+  const keepRatio = Number.isFinite(originH) && originH > 0 && originW > 0;
+
+  handle.setPointerCapture(event.pointerId);
+  const move = (moveEvent) => {
+    entry.w = Math.min(1 - entry.x, Math.max(0.08, originW + (moveEvent.clientX - startX) / box.width));
+    layer.style.width = `${entry.w * 100}%`;
+    if (keepRatio) {
+      entry.h = Math.min(1 - entry.y, Math.max(0.04, originH * (entry.w / originW)));
+      layer.style.height = `${entry.h * 100}%`;
+      layer.style.aspectRatio = "auto";
+    }
+  };
+  const up = () => {
+    handle.releasePointerCapture(event.pointerId);
+    handle.removeEventListener("pointermove", move);
+    handle.removeEventListener("pointerup", up);
+    handle.removeEventListener("pointercancel", up);
+    state.selectedEdit = index;
+    changed();
+  };
+  handle.addEventListener("pointermove", move);
+  handle.addEventListener("pointerup", up);
+  handle.addEventListener("pointercancel", up);
 }
 
 function animDialRow(label, { min, max, step, value, title, onSlide }) {
@@ -5346,8 +6049,13 @@ function beginAnimMove(event, index) {
     selectAnim(index);
     return;
   }
-  if (state.selectedAnim !== index || state.selectedOverlay !== null) {
+  if (
+    state.selectedAnim !== index ||
+    state.selectedOverlay !== null ||
+    state.selectedEdit !== null
+  ) {
     state.selectedAnim = index;
+    state.selectedEdit = null;
     state.selectedOverlay = null;
     layer.classList.add("selected");
   }
@@ -5797,8 +6505,9 @@ window.addEventListener("keydown", (event) => {
       render();
       return;
     }
-    if (state.regionTool) {
+    if (state.regionTool || state.editTool) {
       state.regionTool = false;
+      state.editTool = false;
       state.note = "";
       render();
       return;
@@ -5806,6 +6515,7 @@ window.addEventListener("keydown", (event) => {
     if (state.pictureExpanded) {
       state.pictureExpanded = false;
       state.regionTool = false;
+      state.editTool = false;
       render();
       return;
     }
@@ -5820,8 +6530,13 @@ window.addEventListener("keydown", (event) => {
       render();
       return;
     }
-    if (state.selectedAnim !== null || state.selectedOverlay !== null) {
+    if (
+      state.selectedAnim !== null ||
+      state.selectedEdit !== null ||
+      state.selectedOverlay !== null
+    ) {
       state.selectedAnim = null;
+      state.selectedEdit = null;
       state.selectedOverlay = null;
       render();
       return;
@@ -5845,6 +6560,27 @@ document.addEventListener("pointerdown", (event) => {
   if (event.target.closest(".add-song")) return;
   state.pickerOpen = false;
   render();
+});
+
+document.addEventListener("paste", async (event) => {
+  if (state.page !== "scene") return;
+  if (event.target.closest("input, textarea, [contenteditable]")) return;
+  const items = event.clipboardData?.items;
+  if (!items?.length) return;
+  let file = null;
+  for (const item of items) {
+    if (item.type.startsWith("image/")) {
+      file = item.getAsFile();
+      break;
+    }
+  }
+  if (!file) return;
+  const hasEditTarget =
+    (state.selectedEdit !== null && state.selectedEdit < sceneEdits().length) ||
+    sceneEdits().some((entry) => isPendingEdit(entry));
+  if (!hasEditTarget) return;
+  event.preventDefault();
+  await pasteEditStill(file);
 });
 
 applyRoute();

@@ -1721,6 +1721,24 @@ button {
   box-shadow: 0 0 0 1px rgba(35, 131, 226, 0.35);
 }
 
+.picture-edit.on {
+  color: #b45309;
+  box-shadow: 0 0 0 1px rgba(180, 83, 9, 0.35);
+}
+
+.fuse-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+
+.fuse-bar .meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .region-aspect {
   display: flex;
   align-items: center;
@@ -1856,6 +1874,10 @@ button {
   background: rgba(35, 131, 226, 0.18);
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
   pointer-events: none;
+}
+
+.region-marquee.is-edit {
+  background: rgba(180, 83, 9, 0.2);
 }
 
 .picture.blank {
@@ -2267,6 +2289,41 @@ button {
   background: rgba(35, 131, 226, 0.28);
 }
 
+.edit-layer.is-pending {
+  background: rgba(180, 83, 9, 0.18);
+}
+
+.edit-layer.is-pending.selected {
+  background: rgba(180, 83, 9, 0.3);
+}
+
+.edit-layer .anim-mark {
+  background: #b45309;
+  box-shadow: 0 0 0 1px rgba(180, 83, 9, 0.35);
+}
+
+.edit-still {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  display: block;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .anim-pending-fill {
   position: absolute;
   inset: 0;
@@ -2349,7 +2406,8 @@ button {
   background: transparent;
 }
 
-.anim-video.soft-edges {
+.anim-video.soft-edges,
+.edit-still.soft-edges {
   /* Soft rectangular falloff so hard frame edges blend into the scene. */
   -webkit-mask-image: linear-gradient(to right, transparent, #000 14%, #000 86%, transparent),
     linear-gradient(to bottom, transparent, #000 14%, #000 86%, transparent);
