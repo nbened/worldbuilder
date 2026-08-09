@@ -729,7 +729,7 @@ class Handler(BaseHTTPRequestHandler):
         if route in ("/", "/videos", "/video", "/scene", "/index.html"):
             self.send_file(UI / "index.html")
             return
-        if route in ("/app.js", "/styles.css"):
+        if route in ("/app.js", "/styles.css", "/site.json"):
             self.send_file(UI / route.lstrip("/"))
             return
         if route == "/api/videos":

@@ -3,6 +3,7 @@
 const state = {
   page: "landing", // landing | list | video | scene
   videoId: null,
+  site: null, // ui/site.json — landing copy, etc.
   videos: [],
   script: null,
   assets: { images: [], music: [], sounds: [], effects: [], animations: [] },
@@ -202,6 +203,7 @@ async function applyRoute() {
   if (route.page === "landing") {
     state.videoId = null;
     state.script = null;
+    await loadSite();
     render();
     return;
   }
@@ -2641,6 +2643,30 @@ function videoOutputSummary(video) {
   return null;
 }
 
+async function loadSite() {
+  if (state.site) return state.site;
+  try {
+    const data = await (await fetch("/site.json", { cache: "no-store" })).json();
+    state.site = data && typeof data === "object" ? data : {};
+  } catch {
+    state.site = {};
+  }
+  return state.site;
+}
+
+function landingCopy() {
+  const landing = state.site?.landing || {};
+  return {
+    title: landing.title || "Live in Your Dream World",
+    description: landing.description || "",
+    cta: landing.cta || "Enter",
+    href: landing.href || "/video?v=riverbend",
+    videoId: landing.videoId || "riverbend",
+    video: landing.video || "/assets/videos/landing-loop.mp4",
+    poster: landing.poster || "/assets/videos/landing-poster.jpg",
+  };
+}
+
 async function loadVideos() {
   const data = await (await fetch("/api/videos")).json();
   state.videos = data.videos || [];
@@ -3592,32 +3618,64 @@ function render() {
 }
 
 function landingView() {
+  const copy = landingCopy();
+  const video = h("video", {
+    class: "landing-video",
+    src: copy.video,
+    poster: copy.poster,
+    autoplay: true,
+    muted: true,
+    loop: true,
+    playsinline: true,
+    preload: "auto",
+  });
+  // Attribute-only muted/autoplay is flaky (Safari + Reduce Motion). Drive it.
+  video.muted = true;
+  video.defaultMuted = true;
+  video.playsInline = true;
+  video.setAttribute("muted", "");
+  video.setAttribute("playsinline", "");
+  video.setAttribute("webkit-playsinline", "");
+  const kick = () => {
+    video.muted = true;
+    const play = video.play();
+    if (play && typeof play.catch === "function") play.catch(() => {});
+  };
+  video.addEventListener("loadeddata", kick);
+  video.addEventListener("canplay", kick);
+  document.addEventListener(
+    "visibilitychange",
+    () => {
+      if (!document.hidden) kick();
+    },
+    { passive: true }
+  );
+  // One more nudge after mount — covers late layout / cached decode.
+  requestAnimationFrame(() => kick());
+  setTimeout(kick, 250);
+
   return h(
     "section",
     { class: "landing", "aria-label": "Cozy Journeys" },
-    h("div", {
-      class: "landing-bg",
-      style: {
-        backgroundImage:
-          "url(/thumb?path=" + encodeURIComponent("assets/images/harvest-festival.png") + "&w=1600)",
-      },
-      "aria-hidden": "true",
-    }),
+    h("div", { class: "landing-bg", "aria-hidden": "true" }, video),
     h("div", { class: "landing-veil", "aria-hidden": "true" }),
     h(
       "div",
       { class: "landing-copy" },
-      h("h1", { class: "landing-title", text: "Live in Your Dream World" }),
+      h("h1", { class: "landing-title", text: copy.title }),
+      copy.description
+        ? h("p", { class: "landing-desc", text: copy.description })
+        : null,
       h(
         "a",
         {
           class: "landing-cta",
-          href: "/video?v=riverbend",
+          href: copy.href,
           onClick: (event) => {
             event.preventDefault();
-            go("video", { videoId: "riverbend" });
+            go("video", { videoId: copy.videoId });
           },
-          text: "Enter",
+          text: copy.cta,
         }
       )
     )

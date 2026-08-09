@@ -1324,6 +1324,28 @@ def bridge_map_filter(
         # zoompan's d=N expands *each* input frame into N outputs, which freezes
         # map animations (and any other pre-composited motion) on the first frame.
         fr = "in"
+        # Pan with (iw-iw/zoom)*cx — same as CSS scale + transform-origin.
+        # The older cx*iw-iw/zoom/2 form clamps X/Y on different schedules while
+        # zoom is near 1, which reads as stair-step "up then left" (preview doesn't).
+        def _zoom_xy(px: float, py: float) -> tuple[str, str]:
+            return (
+                f"(iw-iw/zoom)*{px:.6f}",
+                f"(ih-ih/zoom)*{py:.6f}",
+            )
+
+        # zoompan snaps x/y to integers; a light oversample softens stair-steps
+        # without exploding map resolution (8× on a 1536px map hung assembles).
+        def _zoompan(z_expr: str, x_expr: str, y_expr: str, z_peak: float) -> None:
+            oversample = 2 if z_peak >= 2.0 else 1
+            if oversample > 1:
+                parts.append(
+                    f"scale=iw*{oversample}:ih*{oversample}:flags=lanczos"
+                )
+            parts.append(
+                f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':"
+                f"d=1:s={width}x{height}:fps={fps}"
+            )
+            parts.append("setsar=1")
 
         if zoom_dir == "inout" and isinstance(zoom_start, dict) and isinstance(zoom, dict):
             # [zoom out from start][hold map][zoom in to end]
@@ -1359,21 +1381,15 @@ def bridge_map_filter(
                     f"1+({z_end:.6f}-1)*({fr}-{in_start})/{in_span})"
                 )
             # Pan center: use start center while zooming out, end center while zooming in.
+            x_out, y_out = _zoom_xy(scx, scy)
+            x_in, y_in = _zoom_xy(cx, cy)
             x_expr = (
-                f"if(lte({fr},{max(n_out - 1, 0)}),"
-                f"{scx:.6f}*iw-iw/zoom/2,"
-                f"{cx:.6f}*iw-iw/zoom/2)"
+                f"if(lte({fr},{max(n_out - 1, 0)}),{x_out},{x_in})"
             )
             y_expr = (
-                f"if(lte({fr},{max(n_out - 1, 0)}),"
-                f"{scy:.6f}*ih-ih/zoom/2,"
-                f"{cy:.6f}*ih-ih/zoom/2)"
+                f"if(lte({fr},{max(n_out - 1, 0)}),{y_out},{y_in})"
             )
-            parts.append(
-                f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':"
-                f"d=1:s={width}x{height}:fps={fps}"
-            )
-            parts.append("setsar=1")
+            _zoompan(z_expr, x_expr, y_expr, max(z_start, z_end))
         else:
             span_sec = min(max(0.0, float(zoom_span or 0)), duration)
             if span_sec <= 0.01:
@@ -1400,13 +1416,8 @@ def bridge_map_filter(
                     f"if(lte({fr},{start}),1,"
                     f"1+({z_end:.6f}-1)*({fr}-{start})/{anim_span})"
                 )
-            parts.append(
-                f"zoompan=z='{z_expr}':"
-                f"x='{cx:.6f}*iw-iw/zoom/2':"
-                f"y='{cy:.6f}*ih-ih/zoom/2':"
-                f"d=1:s={width}x{height}:fps={fps}"
-            )
-            parts.append("setsar=1")
+            x_expr, y_expr = _zoom_xy(cx, cy)
+            _zoompan(z_expr, x_expr, y_expr, z_end)
     else:
         parts.extend(
             [

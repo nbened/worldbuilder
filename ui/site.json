@@ -1,0 +1,11 @@
+{
+  "landing": {
+    "title": "Live in Your Dream World",
+    "description": "Build and live in your dream world.",
+    "cta": "Enter",
+    "href": "/video?v=riverbend",
+    "videoId": "riverbend",
+    "video": "/assets/videos/landing-loop.mp4?v=2",
+    "poster": "/assets/videos/landing-poster.jpg?v=2"
+  }
+}
