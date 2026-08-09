@@ -343,17 +343,44 @@ def _track_file(entry) -> str:
     return entry if isinstance(entry, str) else entry.get("file", "")
 
 
+def _scene_has_picture(scene: dict) -> bool:
+    if scene.get("image"):
+        return True
+    images = scene.get("images") or []
+    return bool(images)
+
+
+def _silent_scene_hold(scene: dict, defaults: dict) -> float:
+    for key in ("hold", "seconds", "duration"):
+        try:
+            value = float(scene.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    for key in ("scene_seconds", "hold_seconds"):
+        try:
+            value = float(defaults.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 8.0
+
+
 def _scene_can_preview_audio(scenes: list, index: int) -> bool:
     scene = scenes[index]
     # Transitions are visual overlays — they have no playlist of their own.
     if scene.get("is_transition"):
         return False
-    return bool(scene.get("tracks"))
+    # Songs optional — a picture scene can preview as silence (+ optional beds).
+    return bool(scene.get("tracks")) or _scene_has_picture(scene)
 
 
 def mixed_audio(script_path: Path, scene_index: int | None = None) -> Path | None:
     script = load_script(script_path)
     all_scenes = script.get("scenes", [])
+    defaults = script.get("defaults", {})
     if scene_index is not None:
         if scene_index < 0 or scene_index >= len(all_scenes):
             return None
@@ -371,8 +398,6 @@ def mixed_audio(script_path: Path, scene_index: int | None = None) -> Path | Non
         for entry in scene.get("tracks", []) or []
         if _track_file(entry)
     ]
-    if not tracks:
-        return None
 
     sounds = []
     preview_scenes = (
@@ -388,12 +413,17 @@ def mixed_audio(script_path: Path, scene_index: int | None = None) -> Path | Non
             gain = max(0.0, min(float(volume) / 100.0 * 2.2, 2.5))
             sounds.append(f"{path}@{gain:.4f}")
 
-    defaults = script.get("defaults", {})
+    silent_holds = [
+        f"{i}:{_silent_scene_hold(scene, defaults):.3f}"
+        for i, scene in enumerate(scene_list)
+        if not (scene.get("tracks") or [])
+    ]
     parts = [
         f"scene:{scene_index if scene_index is not None else 'all'}",
         str(defaults.get("track_crossfade", 2)),
         str(defaults.get("open_close_fade", 2)),
         f"sounds:{','.join(sounds)}",
+        f"silent:{','.join(silent_holds)}",
         f"transitions:{','.join('1' if s.get('is_transition') else '0' for s in all_scenes)}",
     ]
     for relative in [*tracks, *[item.split("@", 1)[0] for item in sounds]]:
@@ -626,7 +656,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
             mixed = mixed_audio(path, scene_index=scene_index)
             if not mixed:
-                self.send_error(404, "no songs to mix")
+                self.send_error(404, "nothing to mix — add a picture (songs optional)")
                 return
             self.send_media(mixed)
             return

@@ -14,41 +14,28 @@
   },
   "scenes": [
     {
-      "title": "Start Station",
-      "image": "assets/images/map.png",
-      "map": {
-        "seconds": 7
-      },
-      "pan": "none",
-      "zoom": 1,
-      "tracks": [],
-      "sounds": [],
-      "effects": [],
-      "animations": [],
       "is_transition": true,
-      "transition_in": "fade_zoom",
-      "transition_out": "fade_zoom",
+      "transition_of": "t_h6iax3g5",
       "fade_zoom": {
-        "seconds": 5,
+        "include_start": false,
+        "include_end": true,
         "start": {
-          "x": 0.45862517959770116,
-          "y": 0.25286233836206895,
-          "w": 0.26904296875,
-          "h": 0.2932465651939655
+          "x": 0.15,
+          "y": 0.2,
+          "w": 0.35,
+          "h": 0.4
         },
         "end": {
-          "x": 0.4418485093390805,
-          "y": 0.2969524515086206,
-          "w": 0.28086161997126435,
-          "h": 0.3016389412715517
+          "x": 0.5,
+          "y": 0.25,
+          "w": 0.35,
+          "h": 0.4
         },
-        "include_start": false,
-        "include_end": true
+        "seconds": 3
       },
       "image_prompt": "",
       "music_prompt": "",
-      "fade_seconds": 2,
-      "edits": []
+      "sounds": []
     },
     {
       "title": "Riverbend Station",
@@ -120,42 +107,6 @@
       ]
     },
     {
-      "title": "Station to Town",
-      "image": "assets/images/map.png",
-      "map": {
-        "seconds": 7
-      },
-      "pan": "none",
-      "zoom": 1,
-      "tracks": [],
-      "sounds": [],
-      "effects": [],
-      "animations": [],
-      "is_transition": true,
-      "transition_in": "fade_zoom",
-      "transition_out": "fade_zoom",
-      "fade_zoom": {
-        "seconds": 5,
-        "start": {
-          "x": 0.45862517959770116,
-          "y": 0.25286233836206895,
-          "w": 0.26904296875,
-          "h": 0.2932465651939655
-        },
-        "end": {
-          "x": 0.4072759518678161,
-          "y": 0.5395524649784482,
-          "w": 0.28086161997126435,
-          "h": 0.3016389412715517
-        },
-        "include_start": true,
-        "include_end": true
-      },
-      "image_prompt": "",
-      "music_prompt": "",
-      "fade_seconds": 2
-    },
-    {
       "title": "Waterfront",
       "image": "assets/images/waterfront2.png",
       "map": {
@@ -205,42 +156,6 @@
       "image_prompt": "SCENE: A cobblestone market street in a small autumn town, mid \nafternoon, at the height of a harvest market.\n\nA brick bookshop with tall lit windows and a gold-lettered sign \nreading RIVERBEND BOOKS anchors the right side of the frame, its \nshelves visible through the glass. Beside it a stone-fronted cafe with \na striped awning and a hanging sign reading CORNER COFFEE. A red and \nwhite striped market canopy stands on the left over tables of \npumpkins, gourds and preserves, with stacked hay bales and a wooden \nhandcart loaded with squash. A chalkboard menu leans against a crate.\n\nThirty or more handcrafted figures fill the street, standing in small \nclusters, browsing tables, carrying baskets, talking in pairs. Iron \nlamp posts line the cobbles. Drifts of fallen leaves gather along the \ngutters and between the stones. A shallow stream runs behind a wooden \nrailing on the far left, crossed by a low stone arch bridge, with more \nof the town receding uphill into soft focus beyond.\n\nLIGHT: Late afternoon, warm and low. Golden daylight rakes across the \ncobblestones from the left, casting long soft shadows. The shop \nwindows and street lamps are already lit, glowing warm amber against \nthe cooler daylight. Bright but not harsh, with rich falloff into the \nblurred background.\n\nCAST: One figure wears a dusty rose coat, the only cool pink in the \nframe, clearly distinct from the warm reds and rusts worn by others. \nShe stands near the market canopy with her back half turned, partly \nhidden behind a stack of hay bales. Small in frame, not the focal \npoint, and not centered.\n\nCAMERA: Elevated three-quarter view, roughly forty degrees above the \nstreet, close in, as if leaning over a model railway table. Never at \nthe figures' eye level. Shallow tilt-shift depth of field with the \nmarket stall and the near cobbles in sharp focus, the far end of the \nstreet and the bridge softly blurred.\n\nMOOD: Busy, warm, generous. The best hour of the best day of the \nseason, with the light already starting to go.",
       "music_prompt": "Gypsy jazz, minor swing. Lead acoustic archtop guitar playing a\nslinky chromatic descending melody, then fast single-note runs.\nSecond guitar driving hard la pompe rhythm, percussive and dry.\nUpright bass vamping on a repeating figure, hypnotic, staying on\none chord. Fiddle takes the second solo with heavy bow attack.\nD Phrygian dominant over a D7 flat 9 vamp, 104 BPM, swung. Dark,\ntense, propulsive. The harmony never resolves, it just keeps\ncircling. Menacing rather than cheerful. Builds in intensity\nwithout changing chord.",
       "edits": []
-    },
-    {
-      "title": "Town to Campfire",
-      "image": "assets/images/map.png",
-      "map": {
-        "seconds": 7
-      },
-      "pan": "none",
-      "zoom": 1,
-      "tracks": [],
-      "sounds": [],
-      "effects": [],
-      "animations": [],
-      "is_transition": true,
-      "transition_in": "fade_zoom",
-      "transition_out": "fade_zoom",
-      "fade_zoom": {
-        "seconds": 5,
-        "start": {
-          "x": 0.4229974856321839,
-          "y": 0.5651518723060345,
-          "w": 0.26904296875,
-          "h": 0.2932465651939655
-        },
-        "end": {
-          "x": 0.021326104525862106,
-          "y": 0.10318898168103442,
-          "w": 0.28086161997126435,
-          "h": 0.3016389412715517
-        },
-        "include_start": true,
-        "include_end": true
-      },
-      "image_prompt": "",
-      "music_prompt": "",
-      "fade_seconds": 2
     },
     {
       "title": "Campfire",
@@ -314,20 +229,51 @@
       "edits": []
     },
     {
-      "title": "Transition 4",
-      "image": "assets/images/map.png",
+      "title": "Map",
+      "image": "assets/images/map-fused.png",
       "map": {
-        "seconds": 30
+        "seconds": 7
       },
       "pan": "none",
       "zoom": 1,
       "tracks": [],
       "sounds": [],
       "effects": [],
-      "animations": [],
-      "is_transition": false,
-      "transition_in": "fade",
-      "transition_out": "fade",
+      "animations": [
+        {
+          "file": "assets/animations/fire-map.mov",
+          "x": 0.05214181416262301,
+          "y": 0.060540464733249075,
+          "w": 0.19925913797405193,
+          "h": null,
+          "brightness": 100,
+          "saturation": 100,
+          "speed": 100,
+          "aspect": "native",
+          "soft_edges": true,
+          "locked": false,
+          "loop_in": 0.9,
+          "loop_out": 8
+        },
+        {
+          "file": "assets/animations/Generated Video August 09, 2026 - 5_51AM.mp4",
+          "x": 0.6555326846307385,
+          "y": 0.34910647455089827,
+          "w": 0.30222887558216893,
+          "h": 0.25500561377245506,
+          "brightness": 100,
+          "saturation": 100,
+          "speed": 80,
+          "aspect": "landscape",
+          "soft_edges": true,
+          "locked": true,
+          "loop_in": null,
+          "loop_out": null
+        }
+      ],
+      "is_transition": true,
+      "transition_in": "fade_zoom",
+      "transition_out": "fade_zoom",
       "fade_zoom": {
         "seconds": 3,
         "include_start": true,
@@ -347,18 +293,8 @@
       },
       "image_prompt": "",
       "music_prompt": "",
-      "edits": [
-        {
-          "file": "assets/images/map-edit-1786276714431.png",
-          "x": 0.5327509044411176,
-          "y": 0.2854202077615602,
-          "w": 0.4672490955588824,
-          "h": 0.39424142437780696,
-          "aspect": "landscape",
-          "soft_edges": false,
-          "locked": true
-        }
-      ]
+      "id": "t_h6iax3g5",
+      "edits": []
     }
   ],
   "overlays": {

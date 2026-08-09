@@ -26,6 +26,7 @@ from pathlib import Path
 ANIM_LOOP_FADE = 3.0
 ANIM_LOOP_CACHE = Path(__file__).resolve().parent / ".cache" / "anim-loops"
 OVERLAY_CACHE = Path(__file__).resolve().parent / ".cache" / "overlays"
+FUSED_MAP_CACHE = Path(__file__).resolve().parent / ".cache" / "fused-maps"
 OVERLAY_FADE = 0.6
 
 EASE = "({p})*({p})*(3-2*({p}))"  # smoothstep, so pans start and end gently
@@ -163,7 +164,7 @@ class MapBridge:
     """Visual map overlay that straddles two scenes — no owned audio or runtime."""
 
     map_image: Path
-    seconds: float  # total = out_hold + in_hold
+    seconds: float  # total overlay budget
     style_in: str
     style_out: str
     title: str
@@ -174,13 +175,23 @@ class MapBridge:
     zoom_out_span: float = 0.0  # start zoom-out duration
     zoom_in_span: float = 0.0  # end zoom-in duration
     fade_seconds: float = 3.0  # alpha fade in/out at overlay edges
+    # mid = between two scenes; open = before first; close = after last
+    mode: str = "mid"
 
     @property
     def out_hold(self) -> float:
+        if self.mode == "open":
+            return 0.0
+        if self.mode == "close":
+            return self.seconds
         return self.map_hold / 2.0 + self.zoom_out_span
 
     @property
     def in_hold(self) -> float:
+        if self.mode == "close":
+            return 0.0
+        if self.mode == "open":
+            return self.seconds
         return self.map_hold / 2.0 + self.zoom_in_span
 
 
@@ -198,6 +209,28 @@ def _scene_audio_duration(tracks: list[Track], track_crossfade: float) -> float:
     for index in range(1, len(tracks)):
         total -= _pair_crossfade(tracks[index - 1], tracks[index], track_crossfade)
     return max(total, 0.0)
+
+
+DEFAULT_SILENT_SCENE_SECONDS = 8.0
+
+
+def _silent_scene_hold(raw: dict, defaults: dict) -> float:
+    """Picture length for a normal scene with no songs."""
+    for key in ("hold", "seconds", "duration"):
+        try:
+            value = float(raw.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    for key in ("scene_seconds", "hold_seconds"):
+        try:
+            value = float(defaults.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return DEFAULT_SILENT_SCENE_SECONDS
 
 
 def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
@@ -218,10 +251,10 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
         return name if name in XFADE_STYLES else "fade"
 
     def bridge_style(value: str | None) -> str:
-        name = (value or "fade").strip().lower().replace("-", "_").replace(" ", "_")
+        name = (value or "fade_zoom").strip().lower().replace("-", "_").replace(" ", "_")
         if name in ("fadezoom", "zoom_fade"):
             name = "fade_zoom"
-        return name if name in TRANSITION_STYLES else "fade"
+        return name if name in TRANSITION_STYLES else "fade_zoom"
 
     def clamp_zoom_rect(block: dict | None, fallback: dict) -> dict:
         src = block if isinstance(block, dict) else {}
@@ -295,49 +328,93 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             in_span,
         )
 
+    def resolve_transition(raw: dict) -> dict:
+        """Follow transition_of to the shared template config."""
+        ref = raw.get("transition_of")
+        if not ref:
+            return raw
+        for scene in raw_scenes:
+            if (
+                isinstance(scene, dict)
+                and scene.get("is_transition")
+                and not scene.get("transition_of")
+                and scene.get("id") == ref
+            ):
+                return scene
+        return raw
+
+    def transition_zoom_source(raw: dict, cfg: dict) -> dict:
+        """Shared map/timing from template; per-variant zoom rects/includes."""
+        template_fz = cfg.get("fade_zoom") if isinstance(cfg.get("fade_zoom"), dict) else {}
+        variant_fz = raw.get("fade_zoom") if isinstance(raw.get("fade_zoom"), dict) else {}
+        if not raw.get("transition_of"):
+            return cfg
+        merged_fz = {
+            # Duration stays on the shared template.
+            "seconds": template_fz.get("seconds", variant_fz.get("seconds", 3)),
+            "include_start": variant_fz.get(
+                "include_start", template_fz.get("include_start", True)
+            ),
+            "include_end": variant_fz.get(
+                "include_end", template_fz.get("include_end", True)
+            ),
+            "start": variant_fz.get("start", template_fz.get("start")),
+            "end": variant_fz.get("end", template_fz.get("end")),
+        }
+        return {**cfg, "fade_zoom": merged_fz}
+
     # Pass 1: tracks for normal scenes; map bridges for transitions (no owned runtime).
+    flags = [bool(raw.get("is_transition")) for raw in raw_scenes]
     owned_tracks: list[list[Track] | None] = []
-    flags: list[bool] = []
     bridges_after: dict[int, MapBridge] = {}  # keyed by previous scene 0-based index
+    bridges_before: dict[int, MapBridge] = {}  # keyed by next scene 0-based (opening)
 
     for index, raw in enumerate(raw_scenes, start=1):
-        is_transition = bool(raw.get("is_transition"))
-        flags.append(is_transition)
+        is_transition = flags[index - 1]
         if not is_transition:
             owned_tracks.append(_parse_scene_tracks(root, raw))
             continue
 
         owned_tracks.append(None)
-        title = raw.get("title", f"Scene {index}")
-        # Multi-use templates may sit anywhere in the list; only mid-gap stamps
-        # become bridges. Skip edge / adjacent markers instead of failing the mix.
-        if index == 1 or index == len(raw_scenes):
-            print(
-                f"warning: scene {index} ({title}) is a transition at the edge — "
-                "it needs a scene on both sides to overlay (skipped for render)",
-                file=sys.stderr,
-            )
-            continue
-        if flags[index - 2] or bool(raw_scenes[index].get("is_transition")):
-            print(
-                f"warning: scene {index} ({title}) sits next to another transition — skipped",
-                file=sys.stderr,
-            )
+        cfg = resolve_transition(raw)
+        zoom_cfg = transition_zoom_source(raw, cfg)
+        title = cfg.get("title", f"Scene {index}")
+        pos = index - 1  # 0-based
+
+        prev_i = next(
+            (j for j in range(pos - 1, -1, -1) if not flags[j]),
+            None,
+        )
+        next_i = next(
+            (j for j in range(pos + 1, len(flags)) if not flags[j]),
+            None,
+        )
+
+        if prev_i is not None and next_i is not None:
+            mode = "mid"
+        elif prev_i is None and next_i is not None:
+            mode = "open"
+        elif prev_i is not None and next_i is None:
+            # Template parked after the last scene is config-only — not a close.
+            if not raw.get("transition_of"):
+                continue
+            mode = "close"
+        else:
             continue
 
-        map_config = raw.get("map", {})
+        map_config = cfg.get("map", {})
         if isinstance(map_config, str):
             map_config = {"image": map_config}
         if map_config is None:
             map_config = {"seconds": 0}
         map_hold = float(map_config.get("seconds", map_seconds))
-        map_source = map_config.get("image") or shared_map or raw.get("image")
-        style_in = bridge_style(raw.get("transition_in"))
-        style_out = bridge_style(raw.get("transition_out") or raw.get("transition_in"))
+        map_source = map_config.get("image") or shared_map or cfg.get("image")
+        style_in = bridge_style(cfg.get("transition_in"))
+        style_out = bridge_style(cfg.get("transition_out") or cfg.get("transition_in"))
         zoom_start, zoom_end, zoom_out_span, zoom_in_span = None, None, 0.0, 0.0
         if style_in == "fade_zoom" or style_out == "fade_zoom":
-            zoom_start, zoom_end, zoom_out_span, zoom_in_span = parse_fade_zoom(raw)
-            if not isinstance(raw.get("fade_zoom"), dict):
+            zoom_start, zoom_end, zoom_out_span, zoom_in_span = parse_fade_zoom(zoom_cfg)
+            if not isinstance(zoom_cfg.get("fade_zoom"), dict):
                 # Style set but no block yet — default both sides.
                 zoom_start = {"x": 0.15, "y": 0.2, "w": 0.35, "h": 0.4}
                 zoom_end = {"x": 0.5, "y": 0.25, "w": 0.35, "h": 0.4}
@@ -345,7 +422,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                 zoom_in_span = 1.5
         total_hold = map_hold + zoom_out_span + zoom_in_span
         try:
-            edge_fade = float(raw.get("fade_seconds", fade_seconds))
+            edge_fade = float(cfg.get("fade_seconds", fade_seconds))
         except (TypeError, ValueError):
             edge_fade = fade_seconds
         edge_fade = max(0.0, edge_fade)
@@ -353,29 +430,42 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             raise BuildError(
                 f"scene {index} ({title}) is a transition and needs a map image"
             )
-        if total_hold > 0:
-            bridges_after[index - 2] = MapBridge(
-                map_image=resolve(root, map_source, "map image"),
-                seconds=total_hold,
-                style_in=style_in,
-                style_out=style_out,
-                title=title,
-                zoom_start=zoom_start,
-                zoom_end=zoom_end,
-                map_hold=map_hold,
-                zoom_out_span=zoom_out_span,
-                zoom_in_span=zoom_in_span,
-                fade_seconds=edge_fade,
-            )
+        if total_hold <= 0:
+            continue
+
+        map_image = resolve(root, map_source, "map image")
+        map_edits = parse_still_edits(root, cfg.get("edits"))
+        if map_edits:
+            map_image = fuse_still_edits(map_image, map_edits)
+
+        bridge = MapBridge(
+            map_image=map_image,
+            seconds=total_hold,
+            style_in=style_in,
+            style_out=style_out,
+            title=title,
+            zoom_start=zoom_start,
+            zoom_end=zoom_end,
+            map_hold=map_hold,
+            zoom_out_span=zoom_out_span,
+            zoom_in_span=zoom_in_span,
+            fade_seconds=edge_fade,
+            mode=mode,
+        )
+        if mode == "open" and next_i is not None:
+            bridges_before[next_i] = bridge
+        elif prev_i is not None:
+            bridges_after[prev_i] = bridge
 
     scenes: list[Scene] = []
     clock = 0.0
 
     for index, raw in enumerate(raw_scenes, start=1):
-        title = raw.get("title", f"Scene {index}")
         is_transition = flags[index - 1]
-        style_in = xfade_style(raw.get("transition_in"))
-        style_out = xfade_style(raw.get("transition_out"))
+        cfg = resolve_transition(raw) if is_transition else raw
+        title = cfg.get("title", f"Scene {index}")
+        style_in = xfade_style(cfg.get("transition_in"))
+        style_out = xfade_style(cfg.get("transition_out"))
 
         if is_transition:
             # Marker only — runtime lives on the neighboring scenes as a map overlay.
@@ -383,7 +473,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                 Scene(
                     index=index,
                     title=title,
-                    location=raw.get("location", ""),
+                    location=cfg.get("location", ""),
                     segments=[],
                     tracks=[],
                     sounds=[],
@@ -402,25 +492,8 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
         tracks = owned_tracks[index - 1] or []
         audio_duration = _scene_audio_duration(tracks, track_crossfade)
         if audio_duration <= 0:
-            scenes.append(
-                Scene(
-                    index=index,
-                    title=title,
-                    location=raw.get("location", ""),
-                    segments=[],
-                    tracks=[],
-                    sounds=[],
-                    effects=[],
-                    animations=[],
-                    audio_duration=0.0,
-                    start=clock,
-                    track_crossfade=track_crossfade,
-                    is_transition=False,
-                    transition_in=style_in,
-                    transition_out=style_out,
-                )
-            )
-            continue
+            # No songs — still render the picture for a quiet hold (silence under it).
+            audio_duration = _silent_scene_hold(raw, defaults)
 
         sounds: list[tuple[Path, float]] = []
         for entry in raw.get("sounds", []) or []:
@@ -521,13 +594,12 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                 }
             )
 
-        # bridges_after is keyed by the scene before the transition (0-based).
+        # bridges_after: transition after this scene. bridges_before: opening into this scene.
         outgoing = bridges_after.get(index - 1)
-        incoming = (
-            bridges_after.get(index - 3)
-            if index >= 3 and flags[index - 2]
-            else None
-        )
+        incoming = bridges_before.get(index - 1)
+        if incoming is None and index >= 2 and flags[index - 2]:
+            # Mid-gap transition immediately before this scene.
+            incoming = bridges_after.get(index - 3) if index >= 3 else None
         own_map_hold = min(max(0.0, own_map_hold), audio_duration * 0.5)
 
         in_hold = (
@@ -594,8 +666,37 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
 
         bridge_overlays: list[dict] = []
         if in_hold > 0.001 and incoming:
-            # Start of this scene: hold full map, optionally zoom into End, then fade away.
+            # Start of this scene: map overlay, with zoom depending on mode / includes.
+            has_start = bool(incoming.zoom_start) and incoming.zoom_out_span > 0.001
             has_end = bool(incoming.zoom_end) and incoming.zoom_in_span > 0.001
+            if incoming.mode == "open" and has_start and has_end:
+                zoom_dir = "inout"
+                zoom = incoming.zoom_end
+                zoom_start = incoming.zoom_start
+                style = "fade_zoom"
+                zoom_span = incoming.zoom_in_span
+                zoom_out_span = incoming.zoom_out_span
+            elif incoming.mode == "open" and has_start:
+                zoom_dir = "out"
+                zoom = incoming.zoom_start
+                zoom_start = None
+                style = "fade_zoom"
+                zoom_span = incoming.zoom_out_span
+                zoom_out_span = 0.0
+            elif has_end:
+                zoom_dir = "in"
+                zoom = incoming.zoom_end
+                zoom_start = None
+                style = "fade_zoom"
+                zoom_span = incoming.zoom_in_span
+                zoom_out_span = 0.0
+            else:
+                zoom_dir = "in"
+                zoom = None
+                zoom_start = None
+                style = "fade"
+                zoom_span = 0.0
+                zoom_out_span = 0.0
             bridge_overlays.append(
                 {
                     "image": incoming.map_image,
@@ -604,15 +705,46 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                     "fade_in": 0.0,
                     "fade_out": incoming.fade_seconds,
                     "label": incoming.title,
-                    "style": "fade_zoom" if has_end else "fade",
-                    "zoom": incoming.zoom_end if has_end else None,
-                    "zoom_dir": "in",
-                    "zoom_span": incoming.zoom_in_span if has_end else 0.0,
+                    "style": style,
+                    "zoom": zoom,
+                    "zoom_start": zoom_start,
+                    "zoom_dir": zoom_dir,
+                    "zoom_span": zoom_span,
+                    "zoom_out_span": zoom_out_span,
                 }
             )
         if out_hold > 0.001 and outgoing:
             # End of this scene: optionally open on Start and pull out, then hold full map.
             has_start = bool(outgoing.zoom_start) and outgoing.zoom_out_span > 0.001
+            has_end = bool(outgoing.zoom_end) and outgoing.zoom_in_span > 0.001
+            if outgoing.mode == "close" and has_start and has_end:
+                zoom_dir = "inout"
+                zoom = outgoing.zoom_end
+                zoom_start = outgoing.zoom_start
+                style = "fade_zoom"
+                zoom_span = outgoing.zoom_in_span
+                zoom_out_span = outgoing.zoom_out_span
+            elif has_start:
+                zoom_dir = "out"
+                zoom = outgoing.zoom_start
+                zoom_start = None
+                style = "fade_zoom"
+                zoom_span = outgoing.zoom_out_span
+                zoom_out_span = 0.0
+            elif outgoing.mode == "close" and has_end:
+                zoom_dir = "in"
+                zoom = outgoing.zoom_end
+                zoom_start = None
+                style = "fade_zoom"
+                zoom_span = outgoing.zoom_in_span
+                zoom_out_span = 0.0
+            else:
+                zoom_dir = "out"
+                zoom = None
+                zoom_start = None
+                style = "fade"
+                zoom_span = 0.0
+                zoom_out_span = 0.0
             bridge_overlays.append(
                 {
                     "image": outgoing.map_image,
@@ -621,10 +753,12 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                     "fade_in": outgoing.fade_seconds,
                     "fade_out": 0.0,
                     "label": outgoing.title,
-                    "style": "fade_zoom" if has_start else "fade",
-                    "zoom": outgoing.zoom_start if has_start else None,
-                    "zoom_dir": "out",
-                    "zoom_span": outgoing.zoom_out_span if has_start else 0.0,
+                    "style": style,
+                    "zoom": zoom,
+                    "zoom_start": zoom_start,
+                    "zoom_dir": zoom_dir,
+                    "zoom_span": zoom_span,
+                    "zoom_out_span": zoom_out_span,
                 }
             )
 
@@ -796,6 +930,119 @@ def _pil():
     return Image, ImageDraw, ImageFont
 
 
+def parse_still_edits(root: Path, raw_edits) -> list[dict]:
+    """Normalize filled still-edit slots from a scene / transition template."""
+    edits: list[dict] = []
+    for entry in raw_edits or []:
+        if isinstance(entry, str):
+            entry = {"file": entry}
+        source = entry.get("file")
+        if not source:
+            continue
+        aspect = entry.get("aspect", "landscape")
+        if aspect not in ("landscape", "portrait", "native"):
+            aspect = "landscape"
+        height = entry.get("h")
+        h_val = None if height is None else float(height)
+        if h_val is not None and h_val <= 0:
+            h_val = None
+        edits.append(
+            {
+                "path": resolve(root, source, "edit still"),
+                "x": float(entry.get("x", 0.36)),
+                "y": float(entry.get("y", 0.28)),
+                "w": float(entry.get("w", 0.28)),
+                "h": h_val,
+                "aspect": aspect,
+                "soft_edges": bool(entry.get("soft_edges", False)),
+            }
+        )
+    return edits
+
+
+def _edit_box_norm(edit: dict) -> tuple[float, float, float, float]:
+    """Normalized crop box on a 3:2 picture frame (matches ui regionCropNorm)."""
+    x = min(1.0, max(0.0, float(edit["x"])))
+    y = min(1.0, max(0.0, float(edit["y"])))
+    w = min(1.0 - x, max(0.01, float(edit["w"])))
+    h = edit.get("h")
+    if h is not None and float(h) > 0:
+        height = float(h)
+    else:
+        ratio = 16 / 9 if edit.get("aspect") == "landscape" else 9 / 16
+        if edit.get("aspect") == "native":
+            ratio = 16 / 9
+        height = (w * 1.5) / ratio
+    height = min(1.0 - y, max(0.01, height))
+    return x, y, w, height
+
+
+def _cover_crop(im, tw: int, th: int):
+    Image, _, _ = _pil()
+    sw, sh = im.size
+    if sw <= 0 or sh <= 0 or tw <= 0 or th <= 0:
+        return im.resize((max(1, tw), max(1, th)), Image.Resampling.LANCZOS)
+    scale = max(tw / sw, th / sh)
+    nw = max(1, int(round(sw * scale)))
+    nh = max(1, int(round(sh * scale)))
+    resized = im.resize((nw, nh), Image.Resampling.LANCZOS)
+    left = max(0, (nw - tw) // 2)
+    top = max(0, (nh - th) // 2)
+    return resized.crop((left, top, left + tw, top + th))
+
+
+def _feather_rgba(im, edge_frac: float = 0.12):
+    Image, _, _ = _pil()
+    rgba = im.convert("RGBA")
+    w, h = rgba.size
+    edge = max(2, int(round(min(w, h) * edge_frac)))
+    pixels = rgba.load()
+    for y in range(h):
+        for x in range(w):
+            dist = min(x, y, w - 1 - x, h - 1 - y)
+            if dist >= edge:
+                continue
+            r, g, b, a = pixels[x, y]
+            pixels[x, y] = (r, g, b, int(round(a * (dist / edge))))
+    return rgba
+
+
+def fuse_still_edits(base: Path, edits: list[dict]) -> Path:
+    """Bake still edits onto a base image (cached). Used for transition maps."""
+    if not edits:
+        return base
+    Image, _, _ = _pil()
+    parts = [str(base.resolve()), str(base.stat().st_mtime_ns)]
+    for edit in edits:
+        path: Path = edit["path"]
+        parts.append(
+            f"{path.resolve()}:{path.stat().st_mtime_ns}:"
+            f"{edit['x']}:{edit['y']}:{edit['w']}:{edit.get('h')}:"
+            f"{edit.get('aspect')}:{int(bool(edit.get('soft_edges')))}"
+        )
+    key = hashlib.sha1("|".join(parts).encode()).hexdigest()[:20]
+    out = FUSED_MAP_CACHE / f"fuse-{key}.png"
+    if out.exists():
+        return out
+
+    canvas = Image.open(base).convert("RGBA")
+    width, height = canvas.size
+    for edit in edits:
+        x, y, w, h = _edit_box_norm(edit)
+        dx = int(round(x * width))
+        dy = int(round(y * height))
+        dw = max(1, int(round(w * width)))
+        dh = max(1, int(round(h * height)))
+        patch = _cover_crop(Image.open(edit["path"]).convert("RGBA"), dw, dh)
+        if edit.get("soft_edges"):
+            patch = _feather_rgba(patch)
+        canvas.alpha_composite(patch, (dx, dy))
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out, "PNG")
+    return out
+
+
 def pick_font(size: int):
     _, _, ImageFont = _pil()
     candidates = [
@@ -896,11 +1143,26 @@ def collect_bridge_overlays(scenes: list[Scene]) -> list[dict]:
                     "label": overlay.get("label") or "map",
                     "style": overlay.get("style") or "fade",
                     "zoom": overlay.get("zoom"),
+                    "zoom_start": overlay.get("zoom_start"),
                     "zoom_dir": overlay.get("zoom_dir") or "in",
                     "zoom_span": float(overlay.get("zoom_span") or 0),
+                    "zoom_out_span": float(overlay.get("zoom_out_span") or 0),
                 }
             )
     return events
+
+
+def _zoom_rect(zoom: dict | None) -> tuple[float, float, float, float]:
+    if not isinstance(zoom, dict):
+        return 0.25, 0.25, 0.5, 0.5
+    try:
+        zx = min(1.0, max(0.0, float(zoom.get("x", 0.25))))
+        zy = min(1.0, max(0.0, float(zoom.get("y", 0.25))))
+        zw = min(1.0 - zx, max(0.05, float(zoom.get("w", 0.5))))
+        zh = min(1.0 - zy, max(0.05, float(zoom.get("h", 0.5))))
+        return zx, zy, zw, zh
+    except (TypeError, ValueError):
+        return 0.25, 0.25, 0.5, 0.5
 
 
 def bridge_map_filter(
@@ -915,6 +1177,8 @@ def bridge_map_filter(
     zoom: dict | None,
     zoom_dir: str,
     zoom_span: float = 0.0,
+    zoom_start: dict | None = None,
+    zoom_out_span: float = 0.0,
 ) -> str:
     """Filter chain for a map overlay: optional Ken Burns zoom + alpha fade."""
     frames = max(1, int(round(duration * fps)))
@@ -923,45 +1187,94 @@ def bridge_map_filter(
 
     parts: list[str] = [f"fps={fps}"]
 
-    if style == "fade_zoom" and isinstance(zoom, dict):
-        try:
-            zx = min(1.0, max(0.0, float(zoom.get("x", 0.25))))
-            zy = min(1.0, max(0.0, float(zoom.get("y", 0.25))))
-            zw = min(1.0 - zx, max(0.05, float(zoom.get("w", 0.5))))
-            zh = min(1.0 - zy, max(0.05, float(zoom.get("h", 0.5))))
-        except (TypeError, ValueError):
-            zx, zy, zw, zh = 0.25, 0.25, 0.5, 0.5
-        # Fill the frame with the target rect at max zoom.
+    if style == "fade_zoom" and (isinstance(zoom, dict) or isinstance(zoom_start, dict)):
+        zx, zy, zw, zh = _zoom_rect(zoom if isinstance(zoom, dict) else zoom_start)
         z_end = 1.0 / max(min(zw, zh), 0.05)
         cx = zx + zw / 2.0
         cy = zy + zh / 2.0
-        # Zoom only for zoom_span; hold still for the rest of the overlay.
-        span_sec = min(max(0.0, float(zoom_span or 0)), duration)
-        if span_sec <= 0.01:
-            span_sec = duration
-        n_zoom = max(1, int(round(span_sec * fps)))
-        n_zoom = min(n_zoom, frames)
-        anim_span = max(n_zoom - 1, 1)
-        if zoom_dir == "out":
-            # Zoom out over the first zoom_span, then hold full map.
-            z_expr = (
-                f"if(lte(on,{anim_span}),"
-                f"{z_end:.6f}+(1-{z_end:.6f})*on/{anim_span},1)"
+
+        if zoom_dir == "inout" and isinstance(zoom_start, dict) and isinstance(zoom, dict):
+            # [zoom out from start][hold map][zoom in to end]
+            sx, sy, sw, sh = _zoom_rect(zoom_start)
+            z_start = 1.0 / max(min(sw, sh), 0.05)
+            scx = sx + sw / 2.0
+            scy = sy + sh / 2.0
+            out_sec = min(max(0.0, float(zoom_out_span or 0)), duration)
+            in_sec = min(max(0.0, float(zoom_span or 0)), max(0.0, duration - out_sec))
+            n_out = max(1, int(round(out_sec * fps))) if out_sec > 0.01 else 0
+            n_in = max(1, int(round(in_sec * fps))) if in_sec > 0.01 else 0
+            n_out = min(n_out, frames)
+            n_in = min(n_in, max(0, frames - n_out))
+            out_span = max(n_out - 1, 1) if n_out else 1
+            in_start = max(0, frames - n_in)
+            in_span = max(n_in - 1, 1) if n_in else 1
+            # z: start→1 over first span, hold 1, then 1→end over last span
+            if n_out and n_in:
+                z_expr = (
+                    f"if(lte(on,{n_out - 1}),"
+                    f"{z_start:.6f}+(1-{z_start:.6f})*on/{out_span},"
+                    f"if(lte(on,{in_start}),1,"
+                    f"1+({z_end:.6f}-1)*(on-{in_start})/{in_span}))"
+                )
+            elif n_out:
+                z_expr = (
+                    f"if(lte(on,{out_span}),"
+                    f"{z_start:.6f}+(1-{z_start:.6f})*on/{out_span},1)"
+                )
+            else:
+                z_expr = (
+                    f"if(lte(on,{in_start}),1,"
+                    f"1+({z_end:.6f}-1)*(on-{in_start})/{in_span})"
+                )
+            # Pan center: use start center while zooming out, end center while zooming in.
+            x_expr = (
+                f"if(lte(on,{max(n_out - 1, 0)}),"
+                f"{scx:.6f}*iw-iw/zoom/2,"
+                f"{cx:.6f}*iw-iw/zoom/2)"
             )
+            y_expr = (
+                f"if(lte(on,{max(n_out - 1, 0)}),"
+                f"{scy:.6f}*ih-ih/zoom/2,"
+                f"{cy:.6f}*ih-ih/zoom/2)"
+            )
+            parts.append(
+                f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':"
+                f"d={frames}:s={width}x{height}:fps={fps}"
+            )
+            parts.append("setsar=1")
         else:
-            # Hold full map, then zoom in over the last zoom_span.
-            start = max(0, frames - n_zoom)
-            z_expr = (
-                f"if(lte(on,{start}),1,"
-                f"1+({z_end:.6f}-1)*(on-{start})/{anim_span})"
+            span_sec = min(max(0.0, float(zoom_span or 0)), duration)
+            if span_sec <= 0.01:
+                span_sec = duration
+            n_zoom = max(1, int(round(span_sec * fps)))
+            n_zoom = min(n_zoom, frames)
+            anim_span = max(n_zoom - 1, 1)
+            if zoom_dir == "out":
+                # Zoom out over the first zoom_span, then hold full map.
+                # Prefer zoom_start rect when provided.
+                if isinstance(zoom_start, dict):
+                    zx, zy, zw, zh = _zoom_rect(zoom_start)
+                    z_end = 1.0 / max(min(zw, zh), 0.05)
+                    cx = zx + zw / 2.0
+                    cy = zy + zh / 2.0
+                z_expr = (
+                    f"if(lte(on,{anim_span}),"
+                    f"{z_end:.6f}+(1-{z_end:.6f})*on/{anim_span},1)"
+                )
+            else:
+                # Hold full map, then zoom in over the last zoom_span.
+                start = max(0, frames - n_zoom)
+                z_expr = (
+                    f"if(lte(on,{start}),1,"
+                    f"1+({z_end:.6f}-1)*(on-{start})/{anim_span})"
+                )
+            parts.append(
+                f"zoompan=z='{z_expr}':"
+                f"x='{cx:.6f}*iw-iw/zoom/2':"
+                f"y='{cy:.6f}*ih-ih/zoom/2':"
+                f"d={frames}:s={width}x{height}:fps={fps}"
             )
-        parts.append(
-            f"zoompan=z='{z_expr}':"
-            f"x='{cx:.6f}*iw-iw/zoom/2':"
-            f"y='{cy:.6f}*ih-ih/zoom/2':"
-            f"d={frames}:s={width}x{height}:fps={fps}"
-        )
-        parts.append("setsar=1")
+            parts.append("setsar=1")
     else:
         parts.extend(
             [
@@ -1324,6 +1637,8 @@ def build_command(
                 zoom=event.get("zoom"),
                 zoom_dir=str(event.get("zoom_dir") or "in"),
                 zoom_span=float(event.get("zoom_span") or 0),
+                zoom_start=event.get("zoom_start"),
+                zoom_out_span=float(event.get("zoom_out_span") or 0),
             )
             ov = f"map{step}"
             out = f"vm{step}"
@@ -1377,9 +1692,18 @@ def build_command(
             index += 1
 
         if not track_labels:
-            # Skip incomplete scenes (no songs) so one empty card doesn't break the mix.
-            continue
-        if len(track_labels) == 1:
+            # Transitions (and other zero-length markers) stay out of the mix.
+            if scene.audio_duration <= 0.001:
+                continue
+            # Songless picture scene — bed of silence (ambient sounds can still layer on).
+            silence = f"s{scene.index}sil"
+            graph.append(
+                f"anullsrc=channel_layout=stereo:sample_rate=48000,"
+                f"atrim=duration={max(scene.audio_duration, 0.1):.3f},"
+                f"asetpts=PTS-STARTPTS[{silence}]"
+            )
+            merged = silence
+        elif len(track_labels) == 1:
             merged = track_labels[0]
         elif track_crossfade > 0:
             merged = track_labels[0]
@@ -1425,7 +1749,7 @@ def build_command(
         scene_labels.append(exact)
 
     if not scene_labels:
-        raise BuildError("nothing to mix — add songs to at least one scene")
+        raise BuildError("nothing to mix — add a scene with a picture (songs optional)")
     if len(scene_labels) == 1:
         audio_out = scene_labels[0]
     else:
@@ -1554,9 +1878,10 @@ def main() -> int:
         scenes[0].start = 0.0
         for segment in scenes[0].segments:
             segment.start -= offset
-        if total <= 0:
+        if total <= 0 or not scenes[0].segments:
             print(
-                f"error: scene {args.scene} ({scenes[0].title}) has no songs yet",
+                f"error: scene {args.scene} ({scenes[0].title}) has nothing to render — "
+                "add a picture (songs optional)",
                 file=sys.stderr,
             )
             return 1

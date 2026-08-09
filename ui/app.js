@@ -17,6 +17,7 @@ const state = {
   pickerOpen: false,
   movingScene: null, // index of scene waiting to be placed, or null
   placingTransition: null, // index of multi-use transition waiting to be placed, or null
+  editingTransitionVariant: null, // scene index of placement whose zoom rects are being edited
   movingSong: null, // index of song waiting to be placed, or null
   pruneImages: false,
   pruneSongs: false,
@@ -24,12 +25,13 @@ const state = {
   pruneAnims: false,
   renamingPath: null,
   pictureExpanded: false,
-  regionTool: false, // draw animation slot
-  editTool: false, // draw still-edit slot
+  regionTool: false, // draw a still or animation slot
+  regionKind: "animation", // "animation" | "still"
   regionAspect: "landscape", // landscape = 16:9, portrait = 9:16
   detailsDirty: false,
   detailsOpen: false,
   sceneDetailsOpen: false,
+  transitionSettingsOpen: false,
   libraryShowAll: {
     effects: false,
     animations: false,
@@ -163,7 +165,15 @@ function readRoute() {
   return { page: "landing", videoId: null, sceneIndex: 0 };
 }
 
-function go(page, { videoId = state.videoId, sceneIndex = state.sceneIndex } = {}) {
+function go(
+  page,
+  {
+    videoId = state.videoId,
+    sceneIndex = state.sceneIndex,
+    editingVariant = undefined,
+  } = {}
+) {
+  if (editingVariant !== undefined) state.editingTransitionVariant = editingVariant;
   let url = "/";
   if (page === "list") url = "/videos";
   if (page === "video") url = `/video?v=${encodeURIComponent(videoId)}`;
@@ -185,7 +195,6 @@ async function applyRoute() {
   state.selectedOverlay = null;
   state.pictureExpanded = false;
   state.regionTool = false;
-  state.editTool = false;
   overlayUi = null;
 
   if (route.page === "landing") {
@@ -218,7 +227,18 @@ async function applyRoute() {
     }
   }
 
-  const nextScene = Math.min(route.sceneIndex, Math.max(0, scenes().length - 1));
+  let nextScene = Math.min(route.sceneIndex, Math.max(0, scenes().length - 1));
+  if (route.page === "scene") {
+    const canonical = canonicalizeTransitionSceneIndex(nextScene);
+    if (canonical !== nextScene) {
+      nextScene = canonical;
+      history.replaceState(
+        {},
+        "",
+        `/scene?v=${encodeURIComponent(state.videoId)}&s=${nextScene}`
+      );
+    }
+  }
   if (route.page === "scene" && state.sceneIndex !== nextScene) {
     state.libraryShowAll = {
       effects: false,
@@ -274,7 +294,197 @@ function ensureScript() {
   }
   ensureOverlays();
   ensureCreativeBrief();
+  ensureTransitionIds();
   if (!state.script.scenes.length) state.script.scenes.push(blankScene());
+}
+
+function newTransitionId() {
+  return `t_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** Templates get a stable id; thin placements use transition_of → that id. */
+function ensureTransitionIds() {
+  for (const entry of state.script.scenes || []) {
+    if (!entry?.is_transition) continue;
+    if (entry.transition_of) continue;
+    if (typeof entry.id !== "string" || !entry.id) entry.id = newTransitionId();
+  }
+}
+
+function isTransitionVariant(entry) {
+  return !!entry?.is_transition && !!entry.transition_of;
+}
+
+function isTransitionTemplate(entry) {
+  return !!entry?.is_transition && !entry.transition_of;
+}
+
+/** Shared config (map, timing, style) for a transition or one of its variants. */
+function resolveTransition(entry) {
+  if (!entry?.is_transition) return entry;
+  const ref = entry.transition_of;
+  if (!ref) return entry;
+  const template = (state.script?.scenes || []).find(
+    (scene) => isTransitionTemplate(scene) && scene.id === ref
+  );
+  return template || entry;
+}
+
+function transitionTemplateIndex(entry) {
+  const template = resolveTransition(entry);
+  if (!template) return -1;
+  return scenes().findIndex((scene) => scene === template);
+}
+
+/**
+ * Variants share the template scene; only zoom in/out rects (+ includes) differ.
+ * Returns the entry that owns those rects for this placement.
+ */
+function transitionZoomOwner(entry) {
+  if (!entry?.is_transition) return entry;
+  if (isTransitionVariant(entry)) {
+    seedVariantFadeZoom(entry);
+    return entry;
+  }
+  return entry;
+}
+
+/** Copy template rects onto a thin variant once, then they can diverge. */
+function seedVariantFadeZoom(variant) {
+  if (!variant || typeof variant !== "object") return;
+  if (variant.fade_zoom && typeof variant.fade_zoom === "object") {
+    normalizeFadeZoomBlock(variant);
+    return;
+  }
+  const template = resolveTransition(variant);
+  const tz = normalizeFadeZoomBlock(template || variant);
+  variant.fade_zoom = {
+    include_start: tz.include_start,
+    include_end: tz.include_end,
+    start: { ...tz.start },
+    end: { ...tz.end },
+  };
+  normalizeFadeZoomBlock(variant);
+}
+
+/** Which placement's zoom rects are active on the transition config page. */
+function editingTransitionPlacementIndex() {
+  const template = scene();
+  if (!isTransitionTemplate(template)) return state.sceneIndex;
+  const idx = state.editingTransitionVariant;
+  if (idx != null) {
+    const entry = scenes()[idx];
+    if (entry?.is_transition && resolveTransition(entry)?.id === template.id) return idx;
+  }
+  const rows = transitionPlacementRows(template);
+  const selfPlaced = rows.find((row) => row.index === state.sceneIndex);
+  if (selfPlaced) return selfPlaced.index;
+  const first = rows[0];
+  return first ? first.index : state.sceneIndex;
+}
+
+function editingTransitionPlacement() {
+  return scenes()[editingTransitionPlacementIndex()] || scene();
+}
+
+function openTransitionVariant(placementIndex) {
+  const entry = scenes()[placementIndex];
+  if (!entry?.is_transition) return;
+  const templateIndex = transitionTemplateIndex(entry);
+  const openIndex = templateIndex >= 0 ? templateIndex : placementIndex;
+  go("scene", {
+    videoId: state.videoId,
+    sceneIndex: openIndex,
+    editingVariant: placementIndex,
+  });
+}
+
+/** Neighboring normal scenes for a transition index (skipping other transitions). */
+function transitionNeighbors(index) {
+  const list = scenes();
+  let prev = null;
+  let next = null;
+  for (let j = index - 1; j >= 0; j -= 1) {
+    if (!list[j].is_transition) {
+      prev = list[j];
+      break;
+    }
+  }
+  for (let j = index + 1; j < list.length; j += 1) {
+    if (!list[j].is_transition) {
+      next = list[j];
+      break;
+    }
+  }
+  return { prev, next };
+}
+
+/**
+ * Real timeline placement (red dot), not a pool-only template.
+ * Mid-gap always counts. Open/close count for variants, and for a template
+ * sitting before the first scene (legacy “start” transition). Templates parked
+ * after the last scene are config-only and hidden.
+ */
+function isTimelineTransition(index) {
+  const list = scenes();
+  const entry = list[index];
+  if (!entry?.is_transition) return false;
+  const { prev, next } = transitionNeighbors(index);
+  if (prev && next) return true;
+  if (!prev && next) return true; // opening (before first scene)
+  if (prev && !next) return isTransitionVariant(entry); // closing variant only
+  return false;
+}
+
+/** 1-based variant number among timeline placements of this transition. */
+function transitionVariantNumber(index) {
+  const list = scenes();
+  const entry = list[index];
+  if (!entry?.is_transition || !isTimelineTransition(index)) return null;
+  const template = resolveTransition(entry);
+  const id = template?.id;
+  if (!id) return 1;
+  let n = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    if (!isTimelineTransition(i)) continue;
+    if (resolveTransition(list[i])?.id !== id) continue;
+    n += 1;
+    if (i === index) return n;
+  }
+  return n || 1;
+}
+
+function transitionPlacementRows(template) {
+  const id = template?.id;
+  if (!id) return [];
+  const list = scenes();
+  const rows = [];
+  let variant = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    const entry = list[i];
+    if (!isTimelineTransition(i)) continue;
+    if (resolveTransition(entry)?.id !== id) continue;
+    variant += 1;
+    const { prev, next } = transitionNeighbors(i);
+    rows.push({
+      index: i,
+      variant,
+      prev,
+      next,
+      linked: isTransitionVariant(entry),
+      open: !prev && !!next,
+      close: !!prev && !next,
+    });
+  }
+  return rows;
+}
+
+/** If the route points at a thin variant, open the shared config instead. */
+function canonicalizeTransitionSceneIndex(index) {
+  const entry = scenes()[index];
+  if (!isTransitionVariant(entry)) return index;
+  const templateIndex = transitionTemplateIndex(entry);
+  return templateIndex >= 0 ? templateIndex : index;
 }
 
 function ensureCreativeBrief() {
@@ -376,13 +586,14 @@ function blankScene() {
 
 function blankTransition() {
   const entry = blankScene();
-  const n = scenes().filter((scene) => scene.is_transition).length + 1;
+  const n = scenes().filter((scene) => isTransitionTemplate(scene)).length + 1;
   entry.is_transition = true;
+  entry.id = newTransitionId();
   entry.title = `Transition ${n}`;
   entry.tracks = [];
   entry.map = { seconds: DEFAULT_MAP_SECONDS };
-  entry.transition_in = "fade";
-  entry.transition_out = "fade";
+  entry.transition_in = "fade_zoom";
+  entry.transition_out = "fade_zoom";
   entry.fade_zoom = {
     seconds: DEFAULT_ZOOM_SECONDS,
     include_start: true,
@@ -416,7 +627,17 @@ function clampZoomRect(rect, fallback) {
   return out;
 }
 
-function ensureFadeZoom(entry) {
+/** Normalize fade_zoom on this exact entry (no template resolve). */
+function normalizeFadeZoomBlock(entry) {
+  if (!entry || typeof entry !== "object") {
+    return {
+      seconds: DEFAULT_ZOOM_SECONDS,
+      include_start: true,
+      include_end: true,
+      start: { x: 0.15, y: 0.2, w: 0.35, h: 0.4 },
+      end: { x: 0.5, y: 0.25, w: 0.35, h: 0.4 },
+    };
+  }
   if (!entry.fade_zoom || typeof entry.fade_zoom !== "object") {
     entry.fade_zoom = {};
   }
@@ -456,22 +677,39 @@ function ensureFadeZoom(entry) {
   delete entry.fade_zoom_reverse_out;
 
   const zoomSecs = Number(z.seconds);
-  z.seconds = Number.isFinite(zoomSecs) && zoomSecs >= 0 ? zoomSecs : DEFAULT_ZOOM_SECONDS;
+  if (Number.isFinite(zoomSecs) && zoomSecs >= 0) z.seconds = zoomSecs;
+  else if (z.seconds == null) z.seconds = DEFAULT_ZOOM_SECONDS;
   return z;
 }
 
+/** Zoom rects for a placement (variant-local); falls back to template. */
+function ensureFadeZoom(entry) {
+  return normalizeFadeZoomBlock(transitionZoomOwner(entry) || entry);
+}
+
+/** Shared zoom duration lives on the template. */
+function transitionZoomDurationSeconds(entry) {
+  const cfg = resolveTransition(entry) || entry;
+  const z = normalizeFadeZoomBlock(cfg);
+  const n = Number(z.seconds);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_ZOOM_SECONDS;
+}
+
 function transitionStyleOf(entry) {
-  const style = entry?.transition_in || entry?.transition_out || "fade";
-  return TRANSITION_FX.some((fx) => fx.id === style) ? style : "fade";
+  entry = resolveTransition(entry) || entry;
+  const style = entry?.transition_in || entry?.transition_out || "fade_zoom";
+  return TRANSITION_FX.some((fx) => fx.id === style) ? style : "fade_zoom";
 }
 
 function transitionMapSeconds(entry) {
+  entry = resolveTransition(entry) || entry;
   const n = Number(entry?.map?.seconds);
   return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 /** Alpha fade at the map overlay edges (per transition, falls back to defaults). */
 function transitionFadeSeconds(entry) {
+  entry = resolveTransition(entry) || entry;
   const own = Number(entry?.fade_seconds);
   if (Number.isFinite(own) && own >= 0) return own;
   const fallback = Number(state.script?.defaults?.fade_seconds);
@@ -479,21 +717,30 @@ function transitionFadeSeconds(entry) {
 }
 
 function transitionZoomSeconds(entry) {
-  if (!entry || transitionStyleOf(entry) !== "fade_zoom") return 0;
+  const cfg = resolveTransition(entry) || entry;
+  if (!cfg || transitionStyleOf(cfg) !== "fade_zoom") return 0;
   const z = ensureFadeZoom(entry);
   if (!z.include_start && !z.include_end) return 0;
-  const n = Number(z.seconds);
-  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_ZOOM_SECONDS;
+  return transitionZoomDurationSeconds(cfg);
+}
+
+function transitionPlacementMode(index) {
+  if (index == null || index < 0 || !isTimelineTransition(index)) return "mid";
+  const { prev, next } = transitionNeighbors(index);
+  if (!prev && next) return "open";
+  if (prev && !next) return "close";
+  return "mid";
 }
 
 /** Map hold + optional start/end zoom spans across the neighboring scenes. */
-function transitionTiming(entry) {
-  const map = transitionMapSeconds(entry);
+function transitionTiming(entry, index = null) {
+  const cfg = resolveTransition(entry) || entry;
+  const map = transitionMapSeconds(cfg);
   const mapHalf = map / 2;
   let zoom = 0;
   let hasStart = false;
   let hasEnd = false;
-  if (entry && transitionStyleOf(entry) === "fade_zoom") {
+  if (cfg && transitionStyleOf(cfg) === "fade_zoom") {
     const z = ensureFadeZoom(entry);
     hasStart = !!z.include_start;
     hasEnd = !!z.include_end;
@@ -507,9 +754,21 @@ function transitionTiming(entry) {
   } else if (hasStart) startZoom = zoom;
   else if (hasEnd) endZoom = zoom;
 
-  const outHold = mapHalf + startZoom;
-  const inHold = mapHalf + endZoom;
+  let outHold = mapHalf + startZoom;
+  let inHold = mapHalf + endZoom;
   const total = outHold + inHold;
+
+  let idx = index;
+  if (idx == null && entry) idx = scenes().findIndex((scene) => scene === entry);
+  const mode = transitionPlacementMode(idx);
+  if (mode === "open") {
+    outHold = 0;
+    inHold = total;
+  } else if (mode === "close") {
+    outHold = total;
+    inHold = 0;
+  }
+
   return {
     map,
     zoom,
@@ -521,6 +780,7 @@ function transitionTiming(entry) {
     outHold,
     inHold,
     total,
+    mode,
     // Back-compat aliases used by a few call sites.
     side: total / 2,
     zoomHalf: zoom / 2,
@@ -528,62 +788,73 @@ function transitionTiming(entry) {
 }
 
 function transitionFxSelect(value, onPick, label) {
-  return h(
-    "label",
-    { class: "transition-fx-field" },
-    h("span", { text: label }),
-    h(
-      "select",
-      {
-        class: "transition-fx-select",
-        value: value || "fade",
-        onChange: (event) => onPick(event.target.value),
-      },
-      TRANSITION_FX.map((fx) => h("option", { value: fx.id, text: fx.label }))
+  const current = value || "fade_zoom";
+  // Set .value after options exist — assigning beforehand is ignored by browsers.
+  const select = h(
+    "select",
+    {
+      class: "transition-fx-select",
+      onChange: (event) => onPick(event.target.value),
+    },
+    TRANSITION_FX.map((fx) =>
+      h("option", {
+        value: fx.id,
+        text: fx.label,
+        selected: current === fx.id,
+      })
     )
   );
+  select.value = current;
+  return h("label", { class: "transition-fx-field" }, h("span", { text: label }), select);
 }
 
-function fadeZoomFields(entry) {
-  const z = ensureFadeZoom(entry);
-  const toggle = (key, label, hint) =>
+/** Per-variant Start/End include toggles — lives on the variant row. */
+function variantZoomIncludes(placementIndex) {
+  const entry = scenes()[placementIndex];
+  if (!entry?.is_transition) return null;
+  const zoomEntry = transitionZoomOwner(entry);
+  const z = ensureFadeZoom(zoomEntry);
+  const toggle = (key, label) =>
     h(
       "label",
-      { class: `fade-zoom-include${z[key] ? " on" : ""}` },
+      {
+        class: `fade-zoom-include is-compact${z[key] ? " on" : ""}`,
+        title: key === "include_start" ? "Zoom out from Start" : "Zoom in to End",
+        onClick: (event) => event.stopPropagation(),
+      },
       h("input", {
         type: "checkbox",
         checked: !!z[key],
         onChange: (event) => {
-          ensureFadeZoom(entry)[key] = !!event.target.checked;
+          event.stopPropagation();
+          state.editingTransitionVariant = placementIndex;
+          ensureFadeZoom(zoomEntry)[key] = !!event.target.checked;
           changed();
         },
       }),
-      h("span", { text: label }),
-      hint && h("span", { class: "meta", text: hint })
+      h("span", { text: label })
     );
-
   return h(
     "div",
-    { class: "fade-zoom-panel" },
-    h("p", {
-      class: "meta transition-note",
-      text: "Optional zoom targets on the full map. With only End: map holds full, then zooms in. With only Start: opens zoomed in and pulls out to the map.",
-    }),
-    h(
-      "div",
-      { class: "fade-zoom-includes" },
-      toggle("include_start", "Include start", "zoom out from Start"),
-      toggle("include_end", "Include end", "zoom in to End")
-    )
+    {
+      class: "fade-zoom-includes is-row",
+      onClick: (event) => event.stopPropagation(),
+    },
+    toggle("include_start", "Start"),
+    toggle("include_end", "End")
   );
 }
 
 function fadeZoomGuide(which) {
-  const z = ensureFadeZoom(scene());
+  const zoomEntry = isTransitionScene() ? editingTransitionPlacement() : scene();
+  const z = ensureFadeZoom(zoomEntry);
   if (which === "start" && !z.include_start) return null;
   if (which === "end" && !z.include_end) return null;
   const rect = z[which];
   const label = which === "start" ? "Start" : "End";
+  const variant = isTransitionScene()
+    ? transitionVariantNumber(editingTransitionPlacementIndex())
+    : null;
   return h(
     "div",
     {
@@ -594,11 +865,16 @@ function fadeZoomGuide(which) {
         width: `${rect.w * 100}%`,
         height: `${rect.h * 100}%`,
       },
-      title: `${label} zoom target — drag to move, corner to resize`,
+      title: variant
+        ? `${label} · variant ${variant} — drag to move, corner to resize`
+        : `${label} zoom target — drag to move, corner to resize`,
       "data-zoom-which": which,
       onPointerdown: (event) => beginFadeZoomMove(event, which),
     },
-    h("span", { class: "fade-zoom-label", text: label }),
+    h("span", {
+      class: "fade-zoom-label",
+      text: variant ? `${label} · ${variant}` : label,
+    }),
     h("div", {
       class: "fade-zoom-handle",
       title: "Resize",
@@ -608,9 +884,11 @@ function fadeZoomGuide(which) {
 }
 
 function transitionDurationFields(entry) {
-  const timing = transitionTiming(entry);
-  const fadeSecs = transitionFadeSeconds(entry);
-  const zoomStyle = transitionStyleOf(entry) === "fade_zoom";
+  const cfg = resolveTransition(entry) || entry;
+  const placement = isTransitionScene(cfg) ? editingTransitionPlacement() : entry;
+  const timing = transitionTiming(placement);
+  const fadeSecs = transitionFadeSeconds(cfg);
+  const zoomStyle = transitionStyleOf(cfg) === "fade_zoom";
   const showZoom = zoomStyle && (timing.hasStart || timing.hasEnd);
   return h(
     "div",
@@ -618,67 +896,87 @@ function transitionDurationFields(entry) {
     h(
       "label",
       { class: "transition-map-hold" },
-      h("span", { text: "Map (seconds)" }),
+      h("span", { text: "Map" }),
       h("input", {
         type: "number",
         min: "0",
         step: "1",
         value: String(timing.map),
-        title: "How long the map holds (still) across the cut",
+        title: "Map hold in seconds",
         onChange: (event) => {
           const next = Math.max(0, Number(event.target.value) || 0);
-          if (!entry.map || typeof entry.map !== "object") entry.map = {};
-          entry.map.seconds = next;
+          if (!cfg.map || typeof cfg.map !== "object") cfg.map = {};
+          cfg.map.seconds = next;
           changed();
         },
-      })
+      }),
+      h("span", { class: "transition-unit", text: "sec" })
     ),
     h(
       "label",
       { class: "transition-map-hold" },
-      h("span", { text: "Fade (seconds)" }),
+      h("span", { text: "Fade" }),
       h("input", {
         type: "number",
         min: "0",
         step: "0.25",
         value: String(fadeSecs),
-        title: "How long the map fades in at the start and out at the end",
+        title: "Alpha fade in/out in seconds",
         onChange: (event) => {
-          entry.fade_seconds = Math.max(0, Number(event.target.value) || 0);
+          cfg.fade_seconds = Math.max(0, Number(event.target.value) || 0);
           changed();
         },
-      })
+      }),
+      h("span", { class: "transition-unit", text: "sec" })
     ),
     showZoom &&
       h(
         "label",
         { class: "transition-map-hold" },
-        h("span", { text: "Zoom (seconds)" }),
+        h("span", { text: "Zoom" }),
         h("input", {
           type: "number",
           min: "0",
           step: "0.5",
-          value: String(Number(ensureFadeZoom(entry).seconds)),
-          title: timing.hasStart && timing.hasEnd
-            ? "Split across start zoom-out and end zoom-in"
-            : timing.hasStart
-              ? "Duration of the start zoom-out"
-              : "Duration of the end zoom-in",
+          value: String(transitionZoomDurationSeconds(cfg)),
+          title: "Shared zoom length for every variant",
           onChange: (event) => {
             const next = Math.max(0, Number(event.target.value) || 0);
-            ensureFadeZoom(entry).seconds = next;
+            normalizeFadeZoomBlock(cfg).seconds = next;
             changed();
           },
-        })
+        }),
+        h("span", { class: "transition-unit", text: "sec" })
       ),
     h("span", {
       class: "meta transition-duration-total",
       text:
         timing.total > 0
-          ? `Total ${clock(timing.total)} · ${clock(timing.outHold)} before · ${clock(timing.inHold)} after`
+          ? `Total ${clock(timing.total)}${
+              timing.mode === "open"
+                ? ` · opens ${clock(timing.inHold)}`
+                : timing.mode === "close"
+                  ? ` · closes ${clock(timing.outHold)}`
+                  : ` · ${clock(timing.outHold)} before · ${clock(timing.inHold)} after`
+            }`
           : "No overlay",
     })
   );
+}
+
+function addTransitionVariantButton(template) {
+  return h("button", {
+    class: "btn primary",
+    type: "button",
+    text: "Add variant",
+    title: "Add this transition on the video timeline",
+    onClick: () => {
+      if (!template.id) template.id = newTransitionId();
+      state.placingTransition = scenes().findIndex((scene) => scene === template);
+      if (state.placingTransition < 0) state.placingTransition = state.sceneIndex;
+      go("video", { videoId: state.videoId });
+    },
+  });
 }
 
 function beginFadeZoomMove(event, which = "start") {
@@ -688,7 +986,8 @@ function beginFadeZoomMove(event, which = "start") {
   const picture = event.currentTarget.closest(".picture");
   const guide = event.currentTarget;
   if (!picture || !isTransitionScene()) return;
-  const entry = scene();
+  const entry = editingTransitionPlacement();
+  state.editingTransitionVariant = editingTransitionPlacementIndex();
   const z = ensureFadeZoom(entry);
   const rect = z[which] || z.start;
   const box = picture.getBoundingClientRect();
@@ -726,7 +1025,8 @@ function beginFadeZoomResize(event, which = "start") {
   const guide = handle.closest(".fade-zoom-guide");
   const picture = guide?.closest(".picture");
   if (!picture || !isTransitionScene()) return;
-  const entry = scene();
+  const entry = editingTransitionPlacement();
+  state.editingTransitionVariant = editingTransitionPlacementIndex();
   const z = ensureFadeZoom(entry);
   const rect = z[which] || z.start;
   const box = picture.getBoundingClientRect();
@@ -763,7 +1063,13 @@ function isTransitionScene(entry = scene()) {
 
 const sceneEffects = (index = state.sceneIndex) => (scene(index).effects ||= []);
 const sceneAnims = (index = state.sceneIndex) => (scene(index).animations ||= []);
-const sceneEdits = (index = state.sceneIndex) => (scene(index).edits ||= []);
+/** Edits live on the transition template (shared map), not thin variants. */
+function editOwnerScene(index = state.sceneIndex) {
+  const entry = scene(index);
+  if (entry?.is_transition) return resolveTransition(entry) || entry;
+  return entry;
+}
+const sceneEdits = (index = state.sceneIndex) => (editOwnerScene(index).edits ||= []);
 const sceneSounds = (index = state.sceneIndex) => (scene(index).sounds ||= []);
 
 function normalizeEdit(entry) {
@@ -1001,7 +1307,7 @@ function animCropNorm(entry, video = null) {
 }
 
 async function exportRegionStill(entry, { clipboard = true, label = "region" } = {}) {
-  const imagePath = scene()?.image;
+  const imagePath = editOwnerScene()?.image || scene()?.image;
   if (!imagePath || !imageExists(imagePath)) {
     state.note = "No scene image to crop";
     render();
@@ -1035,12 +1341,12 @@ async function exportRegionStill(entry, { clipboard = true, label = "region" } =
     if (clipboard && navigator.clipboard?.write && window.ClipboardItem) {
       try {
         await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-        state.note = "Copied and locked — drag/resize disabled for this slot";
+        state.note = "Copied and locked — empty slot stays put until you Unlock or fill it";
       } catch {
-        state.note = "Downloaded and locked — drag/resize disabled for this slot";
+        state.note = "Downloaded and locked — empty slot stays put until you Unlock or fill it";
       }
     } else {
-      state.note = "Downloaded and locked — drag/resize disabled for this slot";
+      state.note = "Downloaded and locked — empty slot stays put until you Unlock or fill it";
     }
     return true;
   } catch (error) {
@@ -1116,7 +1422,8 @@ function featherEditPatch(patch, dw, dh) {
 }
 
 async function composeFusedSceneCanvas() {
-  const imagePath = scene()?.image;
+  const owner = editOwnerScene();
+  const imagePath = owner?.image;
   if (!imagePath || !imageExists(imagePath)) {
     throw new Error("No scene image to fuse");
   }
@@ -1155,7 +1462,7 @@ async function fuseEditsAndDownload() {
     const canvas = await composeFusedSceneCanvas();
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!blob) throw new Error("Could not build fused image");
-    const stem = baseName(scene().image) || "scene";
+    const stem = baseName(editOwnerScene()?.image) || "scene";
     const name = `${stem}-fused.png`;
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -1273,16 +1580,114 @@ function regionAspectToggle(current, onPick) {
   );
 }
 
+function regionKindToggle(current, onPick, { disabled = false } = {}) {
+  const kind = current === "still" ? "still" : "animation";
+  const pick = (next) => {
+    if (disabled || next === kind) return;
+    onPick(next);
+  };
+  return h(
+    "div",
+    {
+      class: `region-kind${disabled ? " is-disabled" : ""}`,
+      title: disabled ? "Filled slots keep their kind" : "Still edit or animation slot",
+    },
+    h("button", {
+      class: `region-kind-btn${kind === "still" ? " on" : ""}`,
+      type: "button",
+      disabled,
+      text: "Still",
+      onClick: (event) => {
+        event.stopPropagation();
+        pick("still");
+      },
+    }),
+    h("button", {
+      class: `region-kind-btn${kind === "animation" ? " on" : ""}`,
+      type: "button",
+      disabled,
+      text: "Animation",
+      onClick: (event) => {
+        event.stopPropagation();
+        pick("animation");
+      },
+    })
+  );
+}
+
+/** Move an empty selected slot between edits[] and animations[]. */
+function convertSelectedSlotKind(nextKind) {
+  const wantStill = nextKind === "still";
+  if (state.selectedEdit !== null) {
+    const list = sceneEdits();
+    const index = state.selectedEdit;
+    if (index < 0 || index >= list.length) return;
+    const entry = normalizeEdit(list[index]);
+    if (entry.file) return;
+    if (wantStill) {
+      state.regionKind = "still";
+      render();
+      return;
+    }
+    list.splice(index, 1);
+    const slot = normalizeAnim({
+      file: "",
+      x: entry.x,
+      y: entry.y,
+      w: entry.w,
+      h: entry.h,
+      aspect: entry.aspect === "portrait" ? "portrait" : "landscape",
+      soft_edges: entry.soft_edges,
+      locked: entry.locked,
+    });
+    sceneAnims().push(slot);
+    state.selectedEdit = null;
+    state.selectedAnim = sceneAnims().length - 1;
+    state.regionKind = "animation";
+    changed();
+    return;
+  }
+  if (state.selectedAnim !== null) {
+    const list = sceneAnims();
+    const index = state.selectedAnim;
+    if (index < 0 || index >= list.length) return;
+    const entry = normalizeAnim(list[index]);
+    if (entry.file) return;
+    if (!wantStill) {
+      state.regionKind = "animation";
+      render();
+      return;
+    }
+    list.splice(index, 1);
+    const slot = normalizeEdit({
+      file: "",
+      x: entry.x,
+      y: entry.y,
+      w: entry.w,
+      h: entry.h,
+      aspect: entry.aspect === "portrait" ? "portrait" : "landscape",
+      soft_edges: entry.soft_edges,
+      locked: entry.locked,
+    });
+    sceneEdits().push(slot);
+    state.selectedAnim = null;
+    state.selectedEdit = sceneEdits().length - 1;
+    state.regionKind = "still";
+    changed();
+  }
+}
+
 function beginRegionDraw(event) {
   event.preventDefault();
   event.stopPropagation();
   const surface = event.currentTarget;
   const picture = surface.closest(".picture");
   if (!picture) return;
+  const kind = state.regionKind === "still" ? "still" : "animation";
   const box = picture.getBoundingClientRect();
   const startX = Math.min(1, Math.max(0, (event.clientX - box.left) / box.width));
   const startY = Math.min(1, Math.max(0, (event.clientY - box.top) / box.height));
-  const marquee = h("div", { class: "region-marquee" });
+  const marquee = h("div", { class: `region-marquee${kind === "still" ? " is-edit" : ""}` });
   picture.append(marquee);
   const aspect = state.regionAspect === "portrait" ? "portrait" : "landscape";
 
@@ -1313,87 +1718,42 @@ function beginRegionDraw(event) {
       render();
       return;
     }
-    const list = sceneAnims();
-    const slot = normalizeAnim({
-      file: "",
-      x: last.x,
-      y: last.y,
-      w: last.w,
-      h: last.h,
-      soft_edges: true,
-      aspect,
-    });
-    list.push(slot);
-    state.selectedAnim = list.length - 1;
-    state.selectedEdit = null;
-    state.regionTool = false;
-    state.editTool = false;
-    state.note =
-      "Region saved — Copy still for Jim. Select this slot, then add the animated clip to fill it.";
-    changed();
-  };
-  surface.addEventListener("pointermove", move);
-  surface.addEventListener("pointerup", up);
-  surface.addEventListener("pointercancel", up);
-}
-
-function beginEditDraw(event) {
-  event.preventDefault();
-  event.stopPropagation();
-  const surface = event.currentTarget;
-  const picture = surface.closest(".picture");
-  if (!picture) return;
-  const box = picture.getBoundingClientRect();
-  const startX = Math.min(1, Math.max(0, (event.clientX - box.left) / box.width));
-  const startY = Math.min(1, Math.max(0, (event.clientY - box.top) / box.height));
-  const marquee = h("div", { class: "region-marquee is-edit" });
-  picture.append(marquee);
-  const aspect = state.regionAspect === "portrait" ? "portrait" : "landscape";
-
-  const paint = (rect) => {
-    marquee.style.left = `${rect.x * 100}%`;
-    marquee.style.top = `${rect.y * 100}%`;
-    marquee.style.width = `${rect.w * 100}%`;
-    marquee.style.height = `${rect.h * 100}%`;
-    return rect;
-  };
-  paint({ x: startX, y: startY, w: 0, h: 0 });
-
-  surface.setPointerCapture(event.pointerId);
-  let last = { x: startX, y: startY, w: 0, h: 0 };
-  const move = (moveEvent) => {
-    const x = Math.min(1, Math.max(0, (moveEvent.clientX - box.left) / box.width));
-    const y = Math.min(1, Math.max(0, (moveEvent.clientY - box.top) / box.height));
-    last = paint(fitRegionBox(startX, startY, x, y, aspect));
-  };
-  const up = () => {
-    surface.releasePointerCapture(event.pointerId);
-    surface.removeEventListener("pointermove", move);
-    surface.removeEventListener("pointerup", up);
-    surface.removeEventListener("pointercancel", up);
-    marquee.remove();
-    if (last.w < 0.04 || last.h < 0.04) {
-      state.note = "Draw a larger region";
-      render();
-      return;
+    if (kind === "still") {
+      const list = sceneEdits();
+      list.push(
+        normalizeEdit({
+          file: "",
+          x: last.x,
+          y: last.y,
+          w: last.w,
+          h: last.h,
+          soft_edges: false,
+          aspect,
+        })
+      );
+      state.selectedEdit = list.length - 1;
+      state.selectedAnim = null;
+      state.note =
+        "Still region saved — Copy still, adjust, then paste or upload to fill it.";
+    } else {
+      const list = sceneAnims();
+      list.push(
+        normalizeAnim({
+          file: "",
+          x: last.x,
+          y: last.y,
+          w: last.w,
+          h: last.h,
+          soft_edges: true,
+          aspect,
+        })
+      );
+      state.selectedAnim = list.length - 1;
+      state.selectedEdit = null;
+      state.note =
+        "Animation region saved — Copy still for Jim, then add the clip while this slot is selected.";
     }
-    const list = sceneEdits();
-    const slot = normalizeEdit({
-      file: "",
-      x: last.x,
-      y: last.y,
-      w: last.w,
-      h: last.h,
-      soft_edges: false,
-      aspect,
-    });
-    list.push(slot);
-    state.selectedEdit = list.length - 1;
-    state.selectedAnim = null;
-    state.editTool = false;
     state.regionTool = false;
-    state.note =
-      "Edit region saved — Copy still, adjust in your model, then paste or upload to lock it in.";
     changed();
   };
   surface.addEventListener("pointermove", move);
@@ -1428,6 +1788,43 @@ function applyFadeZoomStyle(el, rect, progress) {
   el.style.transform = `scale(${scale})`;
 }
 
+/**
+ * Zoom state at local time along a transition's packed timeline:
+ * [start zoom-out][map hold][end zoom-in].
+ */
+function transitionZoomAt(entry, index, at) {
+  const timing = transitionTiming(entry, index);
+  if (transitionStyleOf(entry) !== "fade_zoom") {
+    return { zoomRect: null, zoomProgress: 0, timing };
+  }
+  const fz = ensureFadeZoom(entry);
+  const t = Math.min(timing.total, Math.max(0, at));
+  const startSpan = timing.hasStart ? timing.startZoom : 0;
+  const endSpan = timing.hasEnd ? timing.endZoom : 0;
+  const mapSpan = Math.max(0, timing.total - startSpan - endSpan);
+
+  if (timing.hasStart && startSpan > 0 && t < startSpan) {
+    return {
+      zoomRect: fz.start,
+      zoomProgress: 1 - Math.min(1, t / startSpan),
+      timing,
+    };
+  }
+  const afterStart = t - startSpan;
+  if (afterStart <= mapSpan + 0.0001) {
+    return { zoomRect: null, zoomProgress: 0, timing };
+  }
+  if (timing.hasEnd && endSpan > 0) {
+    const into = afterStart - mapSpan;
+    return {
+      zoomRect: fz.end,
+      zoomProgress: Math.min(1, Math.max(0, into / endSpan)),
+      timing,
+    };
+  }
+  return { zoomRect: null, zoomProgress: 0, timing };
+}
+
 /** Map path + opacity (+ zoom) for a transition overlay sitting on a normal scene. */
 function transitionOverlayAt(at = player.at) {
   const list = scenes();
@@ -1436,73 +1833,109 @@ function transitionOverlayAt(at = player.at) {
   const local = Math.max(0, at - item.start);
   const mapOf = (entry) => entry?.image || state.script?.map || "";
 
-  const after = list[item.index + 1];
-  if (after?.is_transition) {
-    const timing = transitionTiming(after);
-    const hold = timing.outHold;
-    if (hold > 0.05 && local >= item.duration - hold - 0.001) {
-      const into = local - (item.duration - hold);
-      const fade = Math.max(0, transitionFadeSeconds(after));
+  // Prefer an opening transition before this scene, then a mid/close after the previous cut.
+  const beforeIndex = item.index - 1;
+  const before = beforeIndex >= 0 ? list[beforeIndex] : null;
+  // Opening may sit earlier than index-1 if other transitions cluster — use neighbor search.
+  let openIndex = -1;
+  for (let j = item.index - 1; j >= 0; j -= 1) {
+    if (!list[j].is_transition) break;
+    if (transitionPlacementMode(j) === "open") openIndex = j;
+  }
+  if (openIndex < 0 && before?.is_transition && transitionPlacementMode(beforeIndex) === "open") {
+    openIndex = beforeIndex;
+  }
+
+  if (openIndex >= 0) {
+    const opening = list[openIndex];
+    const cfg = resolveTransition(opening);
+    const timing = transitionTiming(opening, openIndex);
+    const hold = timing.inHold;
+    if (hold > 0.05 && local <= hold + 0.001) {
+      const remaining = hold - local;
+      const fade = Math.max(0, transitionFadeSeconds(cfg));
       const fadeSpan = Math.min(fade || 0.001, hold);
-      const opacity = Math.min(1, Math.max(0, into / fadeSpan));
-      const path = mapOf(after);
-      // Opening: optional zoom out from Start, otherwise stay on full map.
-      let zoomProgress = 0;
-      let zoomRect = null;
-      if (timing.hasStart) {
-        const fz = ensureFadeZoom(after);
-        zoomRect = fz.start;
-        zoomProgress =
-          timing.startZoom > 0.001 ? 1 - Math.min(1, into / timing.startZoom) : 0;
-      }
+      const opacity = remaining >= fadeSpan ? 1 : Math.min(1, Math.max(0, remaining / fadeSpan));
+      const path = mapOf(cfg);
+      const zoom = transitionZoomAt(opening, openIndex, local);
       if (path) {
         return {
           path,
           opacity,
-          title: after.title || "Transition",
-          entry: after,
-          zoomProgress,
-          zoomRect,
+          title: cfg.title || "Transition",
+          entry: opening,
+          zoomProgress: zoom.zoomProgress,
+          zoomRect: zoom.zoomRect,
         };
       }
     }
   }
 
-  const before = list[item.index - 1];
-  if (before?.is_transition) {
-    const timing = transitionTiming(before);
-    const hold = timing.inHold;
-    if (hold > 0.05 && local <= hold + 0.001) {
-      const remaining = hold - local;
-      const fade = Math.max(0, transitionFadeSeconds(before));
+  const afterIndex = item.index + 1;
+  const after = list[afterIndex];
+  if (after?.is_transition) {
+    const cfg = resolveTransition(after);
+    const timing = transitionTiming(after, afterIndex);
+    const hold = timing.outHold;
+    if (hold > 0.05 && local >= item.duration - hold - 0.001) {
+      const into = local - (item.duration - hold);
+      const fade = Math.max(0, transitionFadeSeconds(cfg));
       const fadeSpan = Math.min(fade || 0.001, hold);
-      const opacity = remaining >= fadeSpan ? 1 : Math.min(1, Math.max(0, remaining / fadeSpan));
-      const path = mapOf(before);
-      let zoomProgress = 0;
-      let zoomRect = null;
-      if (timing.hasEnd) {
-        const fz = ensureFadeZoom(before);
-        zoomRect = fz.end;
-        // Closing: hold full map, then zoom in to End.
-        zoomProgress =
-          timing.endZoom > 0.001
-            ? Math.min(1, Math.max(0, (local - timing.mapHalf) / timing.endZoom))
-            : 0;
-      }
+      const opacity = Math.min(1, Math.max(0, into / fadeSpan));
+      const path = mapOf(cfg);
+      const zoom = transitionZoomAt(after, afterIndex, into);
       if (path) {
         return {
           path,
           opacity,
-          title: before.title || "Transition",
+          title: cfg.title || "Transition",
+          entry: after,
+          zoomProgress: zoom.zoomProgress,
+          zoomRect: zoom.zoomRect,
+        };
+      }
+    }
+  }
+
+  if (before?.is_transition && transitionPlacementMode(beforeIndex) !== "open") {
+    const cfg = resolveTransition(before);
+    const timing = transitionTiming(before, beforeIndex);
+    const hold = timing.inHold;
+    if (hold > 0.05 && local <= hold + 0.001) {
+      const remaining = hold - local;
+      const fade = Math.max(0, transitionFadeSeconds(cfg));
+      const fadeSpan = Math.min(fade || 0.001, hold);
+      const opacity = remaining >= fadeSpan ? 1 : Math.min(1, Math.max(0, remaining / fadeSpan));
+      const path = mapOf(cfg);
+      // Mid incoming = second half of packed timeline (after the cut).
+      const zoom = transitionZoomAt(before, beforeIndex, timing.outHold + local);
+      if (path) {
+        return {
+          path,
+          opacity,
+          title: cfg.title || "Transition",
           entry: before,
-          zoomProgress,
-          zoomRect,
+          zoomProgress: zoom.zoomProgress,
+          zoomRect: zoom.zoomRect,
         };
       }
     }
   }
 
   return null;
+}
+
+function silentSceneHold(entry = scene()) {
+  for (const key of ["hold", "seconds", "duration"]) {
+    const value = Number(entry?.[key]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  const defaults = state.script?.defaults || {};
+  for (const key of ["scene_seconds", "hold_seconds"]) {
+    const value = Number(defaults[key]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 8;
 }
 
 function sceneSequence(index) {
@@ -1519,16 +1952,27 @@ function sceneSequence(index) {
     cursor += Math.max(0, duration - crossfade);
     return item;
   });
-  const total = list.length
-    ? list.reduce((sum, item) => sum + item.duration, 0) - crossfade * (list.length - 1)
-    : 0;
-  return { list, total: Math.max(0, total) };
+  if (list.length) {
+    const total =
+      list.reduce((sum, item) => sum + item.duration, 0) - crossfade * (list.length - 1);
+    return { list, total: Math.max(0, total) };
+  }
+  // No songs — still give the picture a quiet hold so process/preview work.
+  const entry = scene(index);
+  const hasPicture = !!(entry?.image || (entry?.images || []).length);
+  return { list, total: hasPicture ? silentSceneHold(entry) : 0 };
 }
 
 /** Playable length on the scene page (map + zoom for transitions). */
 function scenePlayTotal(index = state.sceneIndex) {
   const entry = scene(index);
-  if (entry?.is_transition) return transitionTiming(entry).total;
+  if (entry?.is_transition) {
+    const placement =
+      index === state.sceneIndex && isTransitionTemplate(entry)
+        ? editingTransitionPlacement()
+        : entry;
+    return transitionTiming(placement).total;
+  }
   return sceneSequence(index).total;
 }
 
@@ -1536,17 +1980,19 @@ function videoTimeline() {
   let start = 0;
   const items = scenes().map((entry, index) => {
     const { list, total } = sceneSequence(index);
+    const cfg = entry.is_transition ? resolveTransition(entry) : entry;
+    const image = cfg?.image || "";
     const mapOnly =
-      !!entry.is_transition && transitionTiming(entry).total > 0 && !entry.image;
+      !!entry.is_transition && transitionTiming(cfg).total > 0 && !image;
     const item = {
       index,
-      title: entry.title || `Scene ${index + 1}`,
-      image: entry.image || "",
+      title: cfg?.title || entry.title || `Scene ${index + 1}`,
+      image,
       songs: list,
       duration: total,
       start,
       isTransition: !!entry.is_transition,
-      missing: mapOnly ? false : !entry.image || !imageExists(entry.image),
+      missing: mapOnly ? false : !image || !imageExists(image),
     };
     start += total;
     return item;
@@ -1600,19 +2046,34 @@ function audioKey() {
   const sceneSig = (index) => {
     const entry = scenes()[index];
     if (entry?.is_transition) {
+      const cfg = resolveTransition(entry);
       const timing = transitionTiming(entry);
       const z = ensureFadeZoom(entry);
       const s = z.include_start ? z.start || {} : {};
       const e = z.include_end ? z.end || {} : {};
-      return `t:${entry.image || ""}:${timing.map}:${timing.zoom}:${transitionFadeSeconds(entry)}:${z.include_start ? 1 : 0}:${z.include_end ? 1 : 0}:${entry.transition_in || "fade"}:${s.x},${s.y},${s.w},${s.h}:${e.x},${e.y},${e.w},${e.h}`;
+      return `t:${cfg.id || ""}:${cfg.image || ""}:${timing.map}:${timing.zoom}:${transitionFadeSeconds(cfg)}:${z.include_start ? 1 : 0}:${z.include_end ? 1 : 0}:${cfg.transition_in || "fade_zoom"}:${s.x},${s.y},${s.w},${s.h}:${e.x},${e.y},${e.w},${e.h}`;
     }
     return (entry?.tracks || []).map(fileOf).join(",");
   };
   if (scope.mode === "scene") {
-    return `${state.videoId}|scene:${scope.scene}|${sceneSig(scope.scene)}|${soundSig(scope.scene)}`;
+    const variantIndex = isTransitionScene(scenes()[scope.scene])
+      ? editingTransitionPlacementIndex()
+      : scope.scene;
+    const variant = scenes()[variantIndex];
+    const z = variant?.is_transition ? ensureFadeZoom(variant) : null;
+    const variantSig = z
+      ? `v${variantIndex}:${z.include_start ? 1 : 0}${z.include_end ? 1 : 0}:${z.start?.x},${z.start?.y},${z.end?.x},${z.end?.y}`
+      : "";
+    return `${state.videoId}|scene:${scope.scene}|${sceneSig(scope.scene)}|${variantSig}|${soundSig(scope.scene)}`;
   }
   return `${state.videoId}|video|${scenes()
-    .map((entry, index) => `${sceneSig(index)}+${soundSig(index)}+t${entry.is_transition ? 1 : 0}`)
+    .map((entry, index) => {
+      if (!entry?.is_transition) {
+        return `${sceneSig(index)}+${soundSig(index)}+t0`;
+      }
+      const z = ensureFadeZoom(entry);
+      return `${sceneSig(index)}+${soundSig(index)}+t1:${z.include_start ? 1 : 0}${z.include_end ? 1 : 0}`;
+    })
     .join("|")}`;
 }
 
@@ -1716,28 +2177,14 @@ function syncSceneTransitionPreview() {
     return;
   }
 
-  const entry = scene();
-  const timing = transitionTiming(entry);
+  // Use the selected variant — not the shared template alone.
+  const entry = editingTransitionPlacement();
+  const index = editingTransitionPlacementIndex();
+  const timing = transitionTiming(entry, index);
   const hold = Math.max(0.001, timing.total);
   const at = Math.min(hold, Math.max(0, player.at));
-  let zoomProgress = 0;
-  let zoomRect = null;
-  const fz = transitionStyleOf(entry) === "fade_zoom" ? ensureFadeZoom(entry) : null;
-  if (at <= timing.outHold) {
-    if (timing.hasStart && fz) {
-      zoomRect = fz.start;
-      zoomProgress =
-        timing.startZoom > 0.001 ? 1 - Math.min(1, at / timing.startZoom) : 0;
-    }
-  } else if (timing.hasEnd && fz) {
-    const local = at - timing.outHold;
-    zoomRect = fz.end;
-    zoomProgress =
-      timing.endZoom > 0.001
-        ? Math.min(1, Math.max(0, (local - timing.mapHalf) / timing.endZoom))
-        : 0;
-  }
-  applyFadeZoomStyle(still, zoomRect, zoomProgress);
+  const zoom = transitionZoomAt(entry, index, at);
+  applyFadeZoomStyle(still, zoom.zoomRect, zoom.zoomProgress);
   guides.forEach((guide) => guide.classList.add("is-preview-hidden"));
 }
 
@@ -2284,7 +2731,7 @@ function downloadOutput(sceneNumber = null) {
 }
 
 function downloadSceneImage() {
-  const path = scene()?.image;
+  const path = editOwnerScene()?.image || scene()?.image;
   if (!path) return;
   const name = path.split("/").pop() || "scene.png";
   window.location.href = `/download-asset?path=${encodeURIComponent(path)}&name=${encodeURIComponent(name)}`;
@@ -3476,42 +3923,87 @@ function placeScene(fromIndex, insertAt) {
 }
 
 function canPlaceTransitionAfter(afterSceneIndex) {
-  if (afterSceneIndex < 0) return false;
   const list = scenes();
+  // before first scene
+  if (afterSceneIndex === -1) return list.some((scene) => !scene.is_transition);
+  if (afterSceneIndex < 0) return false;
   const prev = list[afterSceneIndex];
   if (!prev || prev.is_transition) return false;
-  for (let i = afterSceneIndex + 1; i < list.length; i += 1) {
-    if (!list[i].is_transition) return true;
-  }
-  return false;
+  // mid-gap or after the last scene
+  return true;
 }
 
 function placeTransitionAfter(transIndex, afterSceneIndex) {
   const list = scenes();
-  const source = list[transIndex];
-  if (!source?.is_transition) return;
+  const source = resolveTransition(list[transIndex]);
+  if (!isTransitionTemplate(source)) return;
+  if (!source.id) source.id = newTransitionId();
   if (!canPlaceTransitionAfter(afterSceneIndex)) {
     state.placingTransition = null;
-    state.note = "Transitions must sit between two scenes";
+    state.note = "Pick a slot before, between, or after scenes";
     render();
     return;
   }
-  // Stamp a copy — same transition can sit between many scene pairs.
-  // Audio stays on the neighboring scenes; this is a visual marker only.
-  const copy = JSON.parse(JSON.stringify(source));
+  // Linked variant — same map/timing; own zoom in/out rectangles.
+  const tz = normalizeFadeZoomBlock(source);
+  const variant = {
+    is_transition: true,
+    transition_of: source.id,
+    fade_zoom: {
+      include_start: tz.include_start,
+      include_end: tz.include_end,
+      start: { ...tz.start },
+      end: { ...tz.end },
+    },
+  };
   let at = afterSceneIndex + 1;
   while (at < list.length && list[at].is_transition) at += 1;
-  list.splice(at, 0, copy);
+  list.splice(at, 0, variant);
   state.placingTransition = null;
   state.movingScene = null;
-  state.note = "";
+  state.editingTransitionVariant = at;
+  state.note = `Variant ${transitionVariantNumber(at)} placed — open the transition to set its zoom rects`;
   changed();
 }
 
+/** Remove one placement (red ×). Variants unlink; a mid-gap template relocates to the pool if others remain. */
 function removeTransitionAt(index) {
   const list = scenes();
-  if (!list[index]?.is_transition) return;
-  list.splice(index, 1);
+  const entry = list[index];
+  if (!entry?.is_transition) return;
+
+  if (isTransitionVariant(entry)) {
+    list.splice(index, 1);
+  } else {
+    const id = entry.id;
+    const hasVariants = list.some((scene, i) => i !== index && scene.transition_of === id);
+    list.splice(index, 1);
+    if (hasVariants) list.push(entry);
+  }
+
+  if (state.sceneIndex >= list.length) state.sceneIndex = Math.max(0, list.length - 1);
+  else if (isTransitionVariant(scenes()[state.sceneIndex])) {
+    state.sceneIndex = canonicalizeTransitionSceneIndex(state.sceneIndex);
+  }
+  state.placingTransition = null;
+  state.movingScene = null;
+  changed();
+}
+
+/** Delete a transition template and every linked variant (pool trash). */
+function deleteTransitionTemplate(index) {
+  const list = scenes();
+  const entry = list[index];
+  if (!isTransitionTemplate(entry)) {
+    removeTransitionAt(index);
+    return;
+  }
+  const id = entry.id;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const scene = list[i];
+    if (!scene?.is_transition) continue;
+    if (scene.id === id || scene.transition_of === id) list.splice(i, 1);
+  }
   if (state.sceneIndex >= list.length) state.sceneIndex = Math.max(0, list.length - 1);
   state.placingTransition = null;
   state.movingScene = null;
@@ -3560,49 +4052,63 @@ function sceneSlot(insertAt, fromIndex) {
 
 function transitionGap(gap) {
   const placing = state.placingTransition;
+  const markers = (gap.transitions || []).filter(isTimelineTransition);
   if (placing !== null) {
     if (!canPlaceTransitionAfter(gap.afterIndex)) {
-      // Keep existing edge markers visible (with ×) but don't offer a drop here.
-      if (!gap.transitions.length) {
+      if (!markers.length) {
         return h("div", { class: "transition-gap-spacer", "aria-hidden": true });
       }
     } else {
       return h("button", {
         class: "transition-drop",
         type: "button",
-        title: "Add transition here (visual only — songs stay on the scenes)",
+        title:
+          gap.afterIndex < 0
+            ? "Add opening variant before the first scene"
+            : "Add transition here (visual only — songs stay on the scenes)",
         "aria-label": "Add transition here",
         onClick: () => placeTransitionAfter(placing, gap.afterIndex),
       });
     }
   }
 
-  if (!gap.transitions.length) {
+  if (!markers.length) {
     return h("div", { class: "transition-gap-spacer", "aria-hidden": true });
   }
 
   return h(
     "div",
     { class: "transition-markers" },
-    ...gap.transitions.map((index) => {
+    ...markers.map((index) => {
       const entry = scenes()[index];
-      const title = entry?.title || "Transition";
+      const cfg = resolveTransition(entry);
+      const title = cfg?.title || "Transition";
+      const variant = transitionVariantNumber(index);
       return h(
         "div",
-        { class: "transition-dot-wrap", title: `${title} — visual overlay between scenes` },
-        h("button", {
-          class: "transition-dot",
-          type: "button",
-          "aria-label": `Open ${title}`,
-          onClick: () => go("scene", { videoId: state.videoId, sceneIndex: index }),
-        }),
+        {
+          class: "transition-dot-wrap",
+          title: `${title} · variant ${variant} — edit this placement’s zoom in/out`,
+        },
+        h(
+          "button",
+          {
+            class: "transition-dot",
+            type: "button",
+            "aria-label": `Open ${title} variant ${variant}`,
+            text: String(variant),
+            onClick: () => openTransitionVariant(index),
+          }
+        ),
         h(
           "button",
           {
             class: "transition-dot-x",
             type: "button",
-            title: "Remove transition",
-            "aria-label": `Remove ${title}`,
+            title: isTransitionVariant(entry)
+              ? "Remove this variant"
+              : "Remove transition (and all variants)",
+            "aria-label": `Remove ${title} variant ${variant}`,
             onClick: (event) => {
               event.stopPropagation();
               removeTransitionAt(index);
@@ -3695,12 +4201,13 @@ function sceneCard(index, item) {
   );
 }
 
-/** Multi-use transition card — same thumbnail as a scene, Add instead of a grip. */
+/** Multi-use transition card — config template; Add places a linked variant. */
 function transitionCard(index, item) {
   const entry = scenes()[index];
   const selected = state.placingTransition === index;
   const mapHold = transitionTiming(entry).total;
   const known = item.image && !item.missing;
+  const variants = transitionPlacementRows(entry).length;
 
   return h(
     "div",
@@ -3712,7 +4219,7 @@ function transitionCard(index, item) {
       {
         class: `transition-use-btn${selected ? " is-on" : ""}`,
         type: "button",
-        title: selected ? "Cancel" : "Add between two scenes (visual only)",
+        title: selected ? "Cancel" : "Place a variant between two scenes (linked to this config)",
         onClick: (event) => {
           event.stopPropagation();
           state.movingScene = null;
@@ -3745,7 +4252,14 @@ function transitionCard(index, item) {
       h("div", { class: "scene-meta-top" }, h("span", { class: "name", text: item.title })),
       h("span", {
         class: "len",
-        text: mapHold > 0 ? `Visual · ${clock(mapHold)}` : "Visual overlay",
+        text:
+          variants > 0
+            ? `${variants} variant${variants === 1 ? "" : "s"}${
+                mapHold > 0 ? ` · ${clock(mapHold)}` : ""
+              }`
+            : mapHold > 0
+              ? `Visual · ${clock(mapHold)}`
+              : "Visual overlay",
       })
     ),
     h(
@@ -3753,10 +4267,22 @@ function transitionCard(index, item) {
       {
         class: "trash",
         type: "button",
-        title: "Delete transition",
+        title: variants
+          ? "Delete transition and all variants"
+          : "Delete transition",
         onClick: (event) => {
           event.stopPropagation();
-          removeTransitionAt(index);
+          if (
+            variants > 0 &&
+            !confirm(
+              variants > 1
+                ? `Delete “${item.title}” and its ${variants} variants?`
+                : `Delete “${item.title}”?`
+            )
+          ) {
+            return;
+          }
+          deleteTransitionTemplate(index);
         },
       },
       trashIcon()
@@ -3811,7 +4337,7 @@ function transitionPool() {
   const { items } = videoTimeline();
   const transitions = scenes()
     .map((entry, index) => ({ entry, index, item: items[index] }))
-    .filter((row) => row.entry.is_transition);
+    .filter((row) => isTransitionTemplate(row.entry));
   const placing = state.placingTransition;
 
   return h(
@@ -3825,8 +4351,8 @@ function transitionPool() {
         class: "meta",
         text:
           placing !== null
-            ? "Click a red slot — stamps a copy (you can add this between many scenes)"
-            : "Add stamps a visual overlay between scenes; each scene keeps its own songs",
+            ? "Click a red slot — places a variant (same map; its own zoom in/out)"
+            : "Add places a variant between scenes — shared map/timing, per-variant zoom rects",
       })
     ),
     h(
@@ -3908,8 +4434,8 @@ function downloadIcon() {
 function pictureStage(known, image) {
   const expanded = state.pictureExpanded;
   const regionOn = expanded && state.regionTool;
-  const editOn = expanded && state.editTool;
-  const drawOn = regionOn || editOn;
+  const kind = state.regionKind === "still" ? "still" : "animation";
+  const canFuse = filledSceneEdits().length > 0;
   return h(
     "div",
     { class: `picture-frame${expanded ? " is-expanded" : ""}` },
@@ -3936,48 +4462,57 @@ function pictureStage(known, image) {
         h(
           "button",
           {
-            class: `picture-region${regionOn ? " on" : ""}`,
+            class: `picture-region${regionOn ? " on" : ""}${kind === "still" ? " picture-edit" : ""}`,
             type: "button",
-            title: regionOn ? "Cancel region tool" : "Draw a 16:9 or 9:16 region for animation",
-            "aria-label": regionOn ? "Cancel region tool" : "Draw animation region",
+            title: regionOn
+              ? "Cancel region tool"
+              : `Draw a 16:9 or 9:16 ${kind === "still" ? "still" : "animation"} region`,
+            "aria-label": regionOn ? "Cancel region tool" : "Draw region",
             onClick: (event) => {
               event.stopPropagation();
               state.regionTool = !state.regionTool;
-              if (state.regionTool) state.editTool = false;
               state.note = state.regionTool
-                ? `Draw a ${state.regionAspect === "portrait" ? "9:16" : "16:9"} region for Jim`
+                ? `Draw a ${state.regionAspect === "portrait" ? "9:16" : "16:9"} ${
+                    kind === "still" ? "still" : "animation"
+                  } region`
                 : "";
               render();
             },
           },
-          regionIcon()
+          kind === "still" ? editIcon() : regionIcon()
         ),
-        h(
-          "button",
-          {
-            class: `picture-region picture-edit${editOn ? " on" : ""}`,
-            type: "button",
-            title: editOn ? "Cancel edit tool" : "Draw a region to edit as a still",
-            "aria-label": editOn ? "Cancel edit tool" : "Draw edit region",
-            onClick: (event) => {
-              event.stopPropagation();
-              state.editTool = !state.editTool;
-              if (state.editTool) state.regionTool = false;
-              state.note = state.editTool
-                ? `Draw a ${state.regionAspect === "portrait" ? "9:16" : "16:9"} region to edit`
-                : "";
-              render();
-            },
-          },
-          editIcon()
-        ),
-        drawOn &&
+        regionKindToggle(kind, (next) => {
+          state.regionKind = next;
+          if (state.regionTool) {
+            state.note = `Draw a ${state.regionAspect === "portrait" ? "9:16" : "16:9"} ${
+              next === "still" ? "still" : "animation"
+            } region`;
+          }
+          render();
+        }),
+        regionOn &&
           regionAspectToggle(state.regionAspect, (aspect) => {
             state.regionAspect = aspect;
-            const kind = editOn ? "region to edit" : "region for Jim";
-            state.note = `Draw a ${aspect === "portrait" ? "9:16" : "16:9"} ${kind}`;
+            state.note = `Draw a ${aspect === "portrait" ? "9:16" : "16:9"} ${
+              kind === "still" ? "still" : "animation"
+            } region`;
             render();
-          })
+          }),
+        canFuse &&
+          h(
+            "button",
+            {
+              class: "picture-region picture-fuse",
+              type: "button",
+              title: "Fuse filled edits into a downloadable still",
+              "aria-label": "Fuse edits",
+              onClick: (event) => {
+                event.stopPropagation();
+                fuseEditsAndDownload();
+              },
+            },
+            h("span", { class: "picture-fuse-label", text: "Fuse" })
+          )
       ),
     h(
       "button",
@@ -3989,10 +4524,7 @@ function pictureStage(known, image) {
         onClick: (event) => {
           event.stopPropagation();
           state.pictureExpanded = !state.pictureExpanded;
-          if (!state.pictureExpanded) {
-            state.regionTool = false;
-            state.editTool = false;
-          }
+          if (!state.pictureExpanded) state.regionTool = false;
           render();
         },
       },
@@ -4001,8 +4533,8 @@ function pictureStage(known, image) {
     h(
       "div",
       {
-        class: `picture${known ? "" : " blank"}${drawOn ? " region-mode" : ""}${
-          editOn ? " edit-mode" : ""
+        class: `picture${known ? "" : " blank"}${regionOn ? " region-mode" : ""}${
+          regionOn && kind === "still" ? " edit-mode" : ""
         }`,
         onPointerdown: (event) => {
           if (
@@ -4040,11 +4572,14 @@ function pictureStage(known, image) {
         .map((entry) => normalizeEffect(entry))
         .filter((entry) => state.assets.effects.some((effect) => effect.path === entry.file))
         .map((entry) => effectLayer(entry.file, entry.speed)),
-      drawOn &&
+      regionOn &&
         h("div", {
           class: "region-capture",
-          title: editOn ? "Drag to draw an edit region" : "Drag to draw a region",
-          onPointerdown: editOn ? beginEditDraw : beginRegionDraw,
+          title:
+            kind === "still"
+              ? "Drag to draw a still region"
+              : "Drag to draw an animation region",
+          onPointerdown: beginRegionDraw,
         })
     )
   );
@@ -4238,16 +4773,17 @@ function bindChromaCanvas(video, canvas, path) {
 function sceneView() {
   const current = scene();
   const transition = isTransitionScene(current);
+  const cfg = transition ? resolveTransition(current) : current;
   const { list } = sceneSequence(state.sceneIndex);
   const total = scenePlayTotal(state.sceneIndex);
-  const image = current.image;
+  const image = cfg?.image || "";
   const known = image && imageExists(image);
   const bar = playerBar(total, "scene");
   const { node: listNode, rows } = transition
     ? { node: null, rows: [] }
     : playlist(list);
   if (scrubber) scrubber.rows = rows;
-  const timing = transition ? transitionTiming(current) : null;
+  const timing = transition ? transitionTiming(editingTransitionPlacement()) : null;
   const mapHold = timing?.total || 0;
 
   app.classList.toggle("is-expanded", state.pictureExpanded);
@@ -4302,9 +4838,11 @@ function sceneView() {
                     return;
                   }
                   current.is_transition = true;
+                  delete current.transition_of;
+                  if (!current.id) current.id = newTransitionId();
                   current.tracks = [];
-                  current.transition_in = current.transition_in || "fade";
-                  current.transition_out = current.transition_out || current.transition_in || "fade";
+                  current.transition_in = current.transition_in || "fade_zoom";
+                  current.transition_out = current.transition_out || current.transition_in || "fade_zoom";
                   if (transitionStyleOf(current) === "fade_zoom") ensureFadeZoom(current);
                   if (!current.map || typeof current.map !== "object") {
                     current.map = { seconds: DEFAULT_MAP_SECONDS };
@@ -4342,10 +4880,9 @@ function sceneView() {
         (sceneAnims().length > 0 || sceneEdits().length > 0) &&
           h("p", {
             class: "anim-lock-note",
-            text: "Expand the picture to drag or resize. Copy still locks the slot in place.",
+            text: "Still or Animation — same rectangle. Copy still locks empty slots; filled stay movable.",
           }),
-        editControlsDial(),
-        animControlsDial(),
+        regionControlsDial(),
         bar,
         renderStatus(),
         transition
@@ -4360,61 +4897,142 @@ function sceneView() {
                   class: "meta",
                   text:
                     mapHold > 0
-                      ? `${clock(timing.outHold)} before · ${clock(timing.inHold)} after`
+                      ? timing.mode === "open"
+                        ? `Opens ${clock(timing.inHold)}`
+                        : timing.mode === "close"
+                          ? `Closes ${clock(timing.outHold)}`
+                          : `${clock(timing.outHold)} before · ${clock(timing.inHold)} after`
                       : "—",
                 })
               ),
-              h("p", {
-                class: "meta transition-note",
-                text: "Visual only — neighbors keep their songs (hard cut at the midpoint). Length is map + any included zoom. Fade is the alpha in/out at each edge. Play above to preview.",
-              }),
-              h(
-                "div",
-                { class: "transition-fx-row" },
-                transitionFxSelect(transitionStyleOf(current), (next) => {
-                  current.transition_in = next;
-                  current.transition_out = next;
-                  if (next === "fade_zoom") ensureFadeZoom(current);
-                  changed();
-                }, "Style")
-              ),
-              transitionStyleOf(current) === "fade_zoom" && fadeZoomFields(current),
-              transitionDurationFields(current),
               (() => {
-                const list = scenes();
-                const prev = list[state.sceneIndex - 1];
-                const next = list[state.sceneIndex + 1];
-                const rows = [
-                  prev && !prev.is_transition
-                    ? {
-                        title: `Over “${prev.title || "Previous"}” (end)`,
-                        len: timing.outHold > 0 ? clock(timing.outHold) : "—",
-                      }
-                    : null,
-                  next && !next.is_transition
-                    ? {
-                        title: `Over “${next.title || "Next"}” (start)`,
-                        len: timing.inHold > 0 ? clock(timing.inHold) : "—",
-                      }
-                    : null,
-                ].filter(Boolean);
-                return rows.length
-                  ? h(
-                      "ul",
-                      { class: "transition-bridge-list" },
-                      ...rows.map((item) =>
+                if (!current.id) current.id = newTransitionId();
+                const rows = transitionPlacementRows(current);
+                const active = editingTransitionPlacementIndex();
+                const zoomStyle = transitionStyleOf(current) === "fade_zoom";
+                const settingsOpen = state.transitionSettingsOpen;
+                const styleLabel =
+                  TRANSITION_FX.find((fx) => fx.id === transitionStyleOf(current))?.label ||
+                  "Fade";
+                return [
+                  h(
+                    "div",
+                    {
+                      class: `transition-settings${settingsOpen ? " is-open" : ""}`,
+                    },
+                    h(
+                      "button",
+                      {
+                        class: "details-toggle transition-settings-toggle",
+                        type: "button",
+                        "aria-expanded": settingsOpen ? "true" : "false",
+                        onClick: () => {
+                          state.transitionSettingsOpen = !state.transitionSettingsOpen;
+                          render();
+                        },
+                      },
+                      h(
+                        "span",
+                        { class: "details-toggle-label" },
+                        h("span", {
+                          class: "details-chevron",
+                          "aria-hidden": true,
+                          text: settingsOpen ? "▾" : "▸",
+                        }),
+                        h("span", { text: "Settings" })
+                      ),
+                      h("span", {
+                        class: "meta",
+                        text: `${styleLabel} · Map ${timing.map}s · Fade ${transitionFadeSeconds(current)}s${
+                          zoomStyle ? ` · Zoom ${transitionZoomDurationSeconds(current)}s` : ""
+                        }`,
+                      })
+                    ),
+                    settingsOpen &&
+                      h(
+                        "div",
+                        { class: "transition-settings-body" },
+                        h("p", {
+                          class: "meta transition-note",
+                          text: zoomStyle
+                            ? "Shared map + timing. Each variant has its own Start/End zoom rects."
+                            : "Shared map + timing. Fade style — no zoom rects.",
+                        }),
                         h(
-                          "li",
-                          {},
-                          h("span", { text: item.title }),
-                          h("span", { class: "len", text: item.len })
-                        )
+                          "div",
+                          { class: "transition-fx-row" },
+                          transitionFxSelect(transitionStyleOf(current), (next) => {
+                            current.transition_in = next;
+                            current.transition_out = next;
+                            if (next === "fade_zoom") normalizeFadeZoomBlock(current);
+                            changed();
+                          }, "Style")
+                        ),
+                        transitionDurationFields(current)
                       )
-                    )
-                  : h("p", {
-                      class: "meta transition-note",
-                      text: "Place this between two scenes that each have songs.",
-                    });
+                  ),
+                  h(
+                    "div",
+                    { class: "transition-variants" },
+                    h(
+                      "div",
+                      { class: "sequence-head transition-variants-head" },
+                      h("span", { text: "Variants" }),
+                      addTransitionVariantButton(current)
+                    ),
+                    rows.length
+                      ? h(
+                          "ul",
+                          { class: "transition-bridge-list" },
+                          ...rows.map((row) => {
+                            const from = row.prev?.title || "Start";
+                            const to = row.next?.title || "End";
+                            const label = row.open
+                              ? `Opening → ${to}`
+                              : row.close
+                                ? `${from} → End`
+                                : `${from} → ${to}`;
+                            const selected = row.index === active;
+                            const rowTiming = transitionTiming(scenes()[row.index], row.index);
+                            return h(
+                              "li",
+                              {
+                                class: selected ? "is-selected" : "",
+                                onClick: () => {
+                                  state.editingTransitionVariant = row.index;
+                                  render();
+                                },
+                              },
+                              h(
+                                "span",
+                                { class: "transition-variant-label" },
+                                h("span", {
+                                  class: "transition-variant-num",
+                                  text: String(row.variant),
+                                }),
+                                " ",
+                                label
+                              ),
+                              zoomStyle && variantZoomIncludes(row.index),
+                              h("span", {
+                                class: "len",
+                                text: rowTiming.total > 0 ? clock(rowTiming.total) : "—",
+                              })
+                            );
+                          })
+                        )
+                      : h("p", {
+                          class: "meta transition-note",
+                          text: "No variants yet — Add variant, then click a red slot on the video page.",
+                        }),
+                    zoomStyle &&
+                      rows.length > 0 &&
+                      h("p", {
+                        class: "meta transition-note",
+                        text: "Toggle Start / End on a variant, then drag its rects on the map.",
+                      })
+                  ),
+                ];
               })()
             )
           : [
@@ -4436,7 +5054,7 @@ function sceneView() {
 }
 
 function libraryInScene(kind, path) {
-  if (kind === "images") return scene().image === path;
+  if (kind === "images") return (editOwnerScene()?.image || scene().image) === path;
   if (kind === "music") return sceneHasSong(path);
   if (kind === "sounds") return sceneHasSound(path);
   if (kind === "animations") return sceneHasAnim(path);
@@ -4754,6 +5372,7 @@ function fillAnimSlot(path) {
   list[index] = slot;
   state.selectedAnim = index;
   state.selectedEdit = null;
+  state.regionKind = "animation";
   state.note = "Animation snapped into the region";
   changed();
   return true;
@@ -4775,6 +5394,7 @@ function fillEditSlot(path, { replace = false } = {}) {
   list[index] = slot;
   state.selectedEdit = index;
   state.selectedAnim = null;
+  state.regionKind = "still";
   state.note = "Edited still locked into the region";
   changed();
   return true;
@@ -4788,7 +5408,7 @@ function pickImageForScene(path) {
   ) {
     if (fillEditSlot(path, { replace: true })) return;
   }
-  scene().image = path;
+  editOwnerScene().image = path;
   changed();
 }
 
@@ -4799,6 +5419,8 @@ function toggleSceneAnim(path, on) {
     if (fillAnimSlot(path)) return;
     list.push(normalizeAnim(path));
     state.selectedAnim = list.length - 1;
+    state.selectedEdit = null;
+    state.regionKind = "animation";
   } else {
     for (let i = list.length - 1; i >= 0; i -= 1) {
       const file = typeof list[i] === "string" ? list[i] : list[i]?.file;
@@ -4829,7 +5451,7 @@ function libraryItem(kind, item, pruning) {
   const renaming = state.renamingPath === item.path;
 
   if (kind === "images") {
-    const on = scene().image === item.path;
+    const on = (editOwnerScene()?.image || scene().image) === item.path;
     const editTarget =
       state.selectedEdit !== null &&
       state.selectedEdit < sceneEdits().length &&
@@ -5064,8 +5686,9 @@ async function deleteAsset(path) {
     if (!response.ok) throw new Error(data.error || "Delete failed");
 
     let dirty = false;
-    if (scene().image === path) {
-      scene().image = libraryImages().find((image) => image.path !== path)?.path || "";
+    if ((editOwnerScene()?.image || scene().image) === path) {
+      editOwnerScene().image =
+        libraryImages().find((image) => image.path !== path)?.path || "";
       dirty = true;
     }
     ensureCreativeBrief();
@@ -5136,11 +5759,14 @@ function selectAnim(index) {
   state.selectedAnim = index;
   state.selectedEdit = null;
   state.selectedOverlay = null;
+  state.regionKind = "animation";
   render();
 }
 
 function animCanDrag(entry) {
-  return state.pictureExpanded && !entry?.locked;
+  // Lock only freezes empty slots after Copy still. Filled clips stay movable.
+  if (entry?.file) return true;
+  return !entry?.locked;
 }
 
 function animChrome(index, entry) {
@@ -5214,11 +5840,9 @@ function animLayer(entry, index) {
           locked ? " is-locked" : ""
         }${canDrag ? " can-drag" : ""}`,
         style: animLayerStyle(normalized),
-        title: locked
-          ? "Locked — click to select"
-          : canDrag
-            ? "Drag to move, or Copy still to lock"
-            : "Expand the picture to drag or resize",
+        title: canDrag
+          ? "Drag to move, or Copy still to lock"
+          : "Locked — Unlock below to move, or click to select",
         onPointerdown: (event) => animLayerPointer(event, index, normalized),
       },
       h("div", { class: "anim-pending-fill", "aria-hidden": "true" }),
@@ -5271,11 +5895,9 @@ function animLayer(entry, index) {
         locked ? " is-locked" : ""
       }${canDrag ? " can-drag" : ""}`,
       style: animLayerStyle(normalized),
-      title: locked
-        ? "Locked — click to select"
-        : canDrag
-          ? "Drag to move"
-          : "Expand the picture to drag or resize",
+      title: canDrag
+        ? "Drag to move or resize"
+        : "Locked — Unlock in the bar below to move, or click to select",
       onPointerdown: (event) => animLayerPointer(event, index, normalized),
     },
     frontWrap,
@@ -5305,11 +5927,14 @@ function selectEdit(index) {
   state.selectedEdit = index;
   state.selectedAnim = null;
   state.selectedOverlay = null;
+  state.regionKind = "still";
   render();
 }
 
 function editCanDrag(entry) {
-  return state.pictureExpanded && !entry?.locked;
+  // Lock only freezes empty slots after Copy still. Filled stills stay movable.
+  if (entry?.file) return true;
+  return !entry?.locked;
 }
 
 function editChrome(index, entry) {
@@ -5384,11 +6009,9 @@ function editLayer(entry, index) {
           locked ? " is-locked" : ""
         }${canDrag ? " can-drag" : ""}`,
         style: animLayerStyle(normalized),
-        title: locked
-          ? "Locked — paste or upload the edited still"
-          : canDrag
-            ? "Drag to move, or Copy still to lock"
-            : "Expand the picture to drag or resize",
+        title: canDrag
+          ? "Drag to move, or Copy still to lock"
+          : "Locked — Unlock below to move, or paste/upload the still",
         onPointerdown: (event) => editLayerPointer(event, index, normalized),
       },
       h("div", { class: "anim-pending-fill", "aria-hidden": "true" }),
@@ -5404,11 +6027,7 @@ function editLayer(entry, index) {
         selected ? " selected" : ""
       }${locked ? " is-locked" : ""}${canDrag ? " can-drag" : ""}`,
       style: animLayerStyle(normalized),
-      title: locked
-        ? "Locked — click to select"
-        : canDrag
-          ? "Drag to move"
-          : "Expand the picture to drag or resize",
+      title: "Drag to move or resize",
       onPointerdown: (event) => editLayerPointer(event, index, normalized),
     },
     h("img", {
@@ -5421,14 +6040,9 @@ function editLayer(entry, index) {
   );
 }
 
-function editControlsDial() {
-  if (state.selectedEdit === null) return null;
-  const list = sceneEdits();
-  if (state.selectedEdit >= list.length) return null;
-  const entry = normalizeEdit(list[state.selectedEdit]);
-  list[state.selectedEdit] = entry;
-  const index = state.selectedEdit;
+function stillSlotDial(entry, index) {
   const aspect = entry.aspect === "portrait" ? "portrait" : "landscape";
+  const filled = !!entry.file;
   const fileInput = h("input", {
     class: "sr-only",
     type: "file",
@@ -5439,10 +6053,8 @@ function editControlsDial() {
       if (file) await uploadEditStill(file, index);
     },
   });
-
-  return h(
-    "div",
-    { class: "anim-dials pending-hint edit-dials" },
+  return [
+    regionKindToggle("still", convertSelectedSlotKind, { disabled: filled }),
     !entry.locked &&
       regionAspectToggle(aspect, (next) => {
         applyEditAspect(entry, next);
@@ -5461,7 +6073,7 @@ function editControlsDial() {
     h("button", {
       class: "btn",
       type: "button",
-      text: entry.file ? "Replace still" : "Upload still",
+      text: filled ? "Replace still" : "Upload still",
       title: "Upload the adjusted frame into this slot",
       onClick: () => fileInput.click(),
     }),
@@ -5479,16 +6091,233 @@ function editControlsDial() {
       }),
       h("span", { text: "Fade edges" })
     ),
+    entry.locked &&
+      !filled &&
+      h("button", {
+        class: "btn",
+        type: "button",
+        text: "Unlock",
+        title: "Unlock so you can drag or resize this slot again",
+        onClick: () => {
+          entry.locked = false;
+          changed();
+        },
+      }),
+    filledSceneEdits().length > 0 &&
+      h("button", {
+        class: "btn",
+        type: "button",
+        text: "Fuse edits",
+        title: "Bake filled edits into a PNG download (original map/scene stays put)",
+        onClick: () => fuseEditsAndDownload(),
+      }),
     h("span", {
       class: "meta",
-      text: entry.file
-        ? "Still locked in. Paste or upload again to replace it."
+      text: filled
+        ? "Drag or resize anytime. Paste or upload again to replace the still."
         : entry.locked
-          ? "Locked. Paste (⌘V) or upload the adjusted still — it snaps here."
-          : state.pictureExpanded
-            ? "Drag or resize, Copy still to lock, then paste the edited frame back."
-            : "Expand the picture to drag or resize, then Copy still to lock.",
-    })
+          ? "Locked. Paste (⌘V) or upload the adjusted still — it snaps here. Unlock to move."
+          : "Drag or resize, Copy still to lock, then paste the edited frame back.",
+    }),
+  ];
+}
+
+function pendingAnimSlotDial(entry, index) {
+  const aspect = entry.aspect === "portrait" ? "portrait" : "landscape";
+  return [
+    regionKindToggle("animation", convertSelectedSlotKind, { disabled: false }),
+    !entry.locked &&
+      regionAspectToggle(aspect, (next) => {
+        applyAnimAspect(entry, next);
+        state.regionAspect = next;
+        changed();
+      }),
+    h("button", {
+      class: "btn primary",
+      type: "button",
+      text: entry.locked ? "Copy again" : "Copy still",
+      title: entry.locked
+        ? "Copy the still again (slot stays locked)"
+        : "Download and copy for Jim — locks this slot",
+      onClick: () => exportAnimRegionStill(index),
+    }),
+    entry.locked &&
+      h("button", {
+        class: "btn",
+        type: "button",
+        text: "Unlock",
+        title: "Unlock so you can drag or resize this slot again",
+        onClick: () => {
+          entry.locked = false;
+          changed();
+        },
+      }),
+    h(
+      "label",
+      { class: `anim-check${entry.soft_edges ? " on" : ""}` },
+      h("input", {
+        type: "checkbox",
+        checked: entry.soft_edges,
+        onChange: () => {
+          entry.soft_edges = !entry.soft_edges;
+          changed();
+        },
+      }),
+      h("span", { text: "Fade edges" })
+    ),
+    h("span", {
+      class: "meta",
+      text: entry.locked
+        ? "Locked. Add an animation while selected — it snaps here. Unlock to move the slot."
+        : "Drag or resize, then Copy still to lock. Next animation you add fills this slot.",
+    }),
+  ];
+}
+
+function filledAnimSlotDial(entry, index) {
+  const setAspect = (next) => {
+    entry.aspect = entry.aspect === next ? "native" : next;
+    changed();
+  };
+  return [
+    regionKindToggle("animation", convertSelectedSlotKind, { disabled: true }),
+    animDialRow("Light", {
+      min: 20,
+      max: 180,
+      step: 5,
+      value: entry.brightness,
+      title: "Animation brightness",
+      onSlide: (next, input) => {
+        entry.brightness = next;
+        const label = input.parentElement?.querySelector(".anim-dial-value");
+        if (label) label.textContent = `${next}%`;
+        const look = animCssFilter(entry);
+        document
+          .querySelectorAll(".anim-layer.selected .anim-video")
+          .forEach((video) => {
+            video.style.filter = look;
+          });
+      },
+    }),
+    animDialRow("Color", {
+      min: 0,
+      max: 200,
+      step: 5,
+      value: entry.saturation,
+      title: "Animation saturation",
+      onSlide: (next, input) => {
+        entry.saturation = next;
+        const label = input.parentElement?.querySelector(".anim-dial-value");
+        if (label) label.textContent = `${next}%`;
+        const look = animCssFilter(entry);
+        document
+          .querySelectorAll(".anim-layer.selected .anim-video")
+          .forEach((video) => {
+            video.style.filter = look;
+          });
+      },
+    }),
+    animDialRow("Speed", {
+      min: 25,
+      max: 200,
+      step: 5,
+      value: entry.speed,
+      title: "Animation speed",
+      onSlide: (next, input) => {
+        entry.speed = next;
+        const label = input.parentElement?.querySelector(".anim-dial-value");
+        if (label) label.textContent = `${next}%`;
+        const rate = Math.min(4, Math.max(0.1, next / 100));
+        document
+          .querySelectorAll(`video[data-anim="${CSS.escape(String(index))}"]`)
+          .forEach((video) => {
+            video.playbackRate = rate;
+          });
+      },
+    }),
+    h(
+      "div",
+      { class: "anim-aspect" },
+      h("span", { class: "anim-dial-label", text: "Frame" }),
+      h(
+        "div",
+        { class: "anim-aspect-choices" },
+        h("button", {
+          class: `anim-aspect-btn landscape${entry.aspect === "landscape" ? " on" : ""}`,
+          type: "button",
+          title: entry.aspect === "landscape" ? "Use native frame" : "16:9 landscape",
+          "aria-label": "Landscape 16 by 9",
+          onClick: () => setAspect("landscape"),
+        }),
+        h("button", {
+          class: `anim-aspect-btn portrait${entry.aspect === "portrait" ? " on" : ""}`,
+          type: "button",
+          title: entry.aspect === "portrait" ? "Use native frame" : "9:16 portrait",
+          "aria-label": "Portrait 9 by 16",
+          onClick: () => setAspect("portrait"),
+        })
+      ),
+      h("span", {
+        class: "anim-dial-value",
+        text: entry.aspect === "native" ? "native" : entry.aspect === "landscape" ? "16:9" : "9:16",
+      })
+    ),
+    h(
+      "label",
+      { class: `anim-check${entry.soft_edges ? " on" : ""}` },
+      h("input", {
+        type: "checkbox",
+        checked: entry.soft_edges,
+        onChange: () => {
+          entry.soft_edges = !entry.soft_edges;
+          changed();
+        },
+      }),
+      h("span", { text: "Fade edges" })
+    ),
+    entry.locked &&
+      h("button", {
+        class: "btn",
+        type: "button",
+        text: "Unlock",
+        title: "Clear the lock flag (filled clips can already be dragged)",
+        onClick: () => {
+          entry.locked = false;
+          changed();
+        },
+      }),
+    animTrimControl(entry, index),
+  ];
+}
+
+function regionControlsDial() {
+  if (state.selectedEdit !== null) {
+    const list = sceneEdits();
+    if (state.selectedEdit >= list.length) return null;
+    const entry = normalizeEdit(list[state.selectedEdit]);
+    list[state.selectedEdit] = entry;
+    return h(
+      "div",
+      { class: "anim-dials pending-hint edit-dials" },
+      ...stillSlotDial(entry, state.selectedEdit)
+    );
+  }
+  if (state.selectedAnim === null) return null;
+  const list = sceneAnims();
+  if (state.selectedAnim >= list.length) return null;
+  const entry = normalizeAnim(list[state.selectedAnim]);
+  list[state.selectedAnim] = entry;
+  if (!entry.file) {
+    return h(
+      "div",
+      { class: "anim-dials pending-hint" },
+      ...pendingAnimSlotDial(entry, state.selectedAnim)
+    );
+  }
+  return h(
+    "div",
+    { class: `anim-dials${state.pictureExpanded ? " pending-hint" : ""}` },
+    ...filledAnimSlotDial(entry, state.selectedAnim)
   );
 }
 
@@ -5498,7 +6327,8 @@ async function uploadEditStill(file, index = state.selectedEdit) {
   state.note = `Uploading ${file.name}…`;
   render();
   try {
-    const stem = (scene()?.image ? baseName(scene().image) : "edit") || "edit";
+    const owner = editOwnerScene();
+    const stem = (owner?.image ? baseName(owner.image) : "edit") || "edit";
     const ext = (file.name.match(/\.[^.]+$/) || [".png"])[0].toLowerCase();
     const name = `${stem}-edit-${Date.now()}${ext}`;
     const response = await fetch(
@@ -5637,151 +6467,6 @@ function animDialRow(label, { min, max, step, value, title, onSlide }) {
       },
     }),
     h("span", { class: "anim-dial-value", text: `${value}%` })
-  );
-}
-
-function animControlsDial() {
-  if (state.selectedAnim === null) return null;
-  const list = sceneAnims();
-  if (state.selectedAnim >= list.length) return null;
-  const entry = normalizeAnim(list[state.selectedAnim]);
-  list[state.selectedAnim] = entry;
-  if (!entry.file) {
-    const aspect = entry.aspect === "portrait" ? "portrait" : "landscape";
-    const index = state.selectedAnim;
-    return h(
-      "div",
-      { class: "anim-dials pending-hint" },
-      !entry.locked &&
-        regionAspectToggle(aspect, (next) => {
-          applyAnimAspect(entry, next);
-          state.regionAspect = next;
-          changed();
-        }),
-      h("button", {
-        class: "btn primary",
-        type: "button",
-        text: entry.locked ? "Copy again" : "Copy still",
-        title: entry.locked
-          ? "Copy the still again (slot stays locked)"
-          : "Download and copy for Jim — locks this slot",
-        onClick: () => exportAnimRegionStill(index),
-      }),
-      h("span", {
-        class: "meta",
-        text: entry.locked
-          ? "Locked. Upload/add an animation while this slot is selected — it snaps here."
-          : state.pictureExpanded
-            ? "Drag or resize here, then Copy still to lock. Next animation you add fills this slot."
-            : "Expand the picture to drag or resize, then Copy still to lock.",
-      })
-    );
-  }
-  const index = state.selectedAnim;
-
-  const setAspect = (next) => {
-    entry.aspect = entry.aspect === next ? "native" : next;
-    changed();
-  };
-
-  return h(
-    "div",
-    { class: "anim-dials" },
-    animDialRow("Light", {
-      min: 20,
-      max: 180,
-      step: 5,
-      value: entry.brightness,
-      title: "Animation brightness",
-      onSlide: (next, input) => {
-        entry.brightness = next;
-        const label = input.parentElement?.querySelector(".anim-dial-value");
-        if (label) label.textContent = `${next}%`;
-        const look = animCssFilter(entry);
-        document
-          .querySelectorAll(".anim-layer.selected .anim-video")
-          .forEach((video) => {
-            video.style.filter = look;
-          });
-      },
-    }),
-    animDialRow("Color", {
-      min: 0,
-      max: 200,
-      step: 5,
-      value: entry.saturation,
-      title: "Animation saturation",
-      onSlide: (next, input) => {
-        entry.saturation = next;
-        const label = input.parentElement?.querySelector(".anim-dial-value");
-        if (label) label.textContent = `${next}%`;
-        const look = animCssFilter(entry);
-        document
-          .querySelectorAll(".anim-layer.selected .anim-video")
-          .forEach((video) => {
-            video.style.filter = look;
-          });
-      },
-    }),
-    animDialRow("Speed", {
-      min: 25,
-      max: 200,
-      step: 5,
-      value: entry.speed,
-      title: "Animation speed",
-      onSlide: (next, input) => {
-        entry.speed = next;
-        const label = input.parentElement?.querySelector(".anim-dial-value");
-        if (label) label.textContent = `${next}%`;
-        const rate = Math.min(4, Math.max(0.1, next / 100));
-        document
-          .querySelectorAll(`video[data-anim="${CSS.escape(String(index))}"]`)
-          .forEach((video) => {
-            video.playbackRate = rate;
-          });
-      },
-    }),
-    h(
-      "div",
-      { class: "anim-aspect" },
-      h("span", { class: "anim-dial-label", text: "Frame" }),
-      h(
-        "div",
-        { class: "anim-aspect-choices" },
-        h("button", {
-          class: `anim-aspect-btn landscape${entry.aspect === "landscape" ? " on" : ""}`,
-          type: "button",
-          title: entry.aspect === "landscape" ? "Use native frame" : "16:9 landscape",
-          "aria-label": "Landscape 16 by 9",
-          onClick: () => setAspect("landscape"),
-        }),
-        h("button", {
-          class: `anim-aspect-btn portrait${entry.aspect === "portrait" ? " on" : ""}`,
-          type: "button",
-          title: entry.aspect === "portrait" ? "Use native frame" : "9:16 portrait",
-          "aria-label": "Portrait 9 by 16",
-          onClick: () => setAspect("portrait"),
-        })
-      ),
-      h("span", {
-        class: "anim-dial-value",
-        text: entry.aspect === "native" ? "native" : entry.aspect === "landscape" ? "16:9" : "9:16",
-      })
-    ),
-    h(
-      "label",
-      { class: `anim-check${entry.soft_edges ? " on" : ""}` },
-      h("input", {
-        type: "checkbox",
-        checked: entry.soft_edges,
-        onChange: () => {
-          entry.soft_edges = !entry.soft_edges;
-          changed();
-        },
-      }),
-      h("span", { text: "Fade edges" })
-    ),
-    animTrimControl(entry, index)
   );
 }
 
@@ -6131,7 +6816,7 @@ function videoTransitionEvents(total) {
   const events = [];
   for (let index = 0; index < list.length; index += 1) {
     const entry = list[index];
-    if (!entry?.is_transition) continue;
+    if (!isTimelineTransition(index)) continue;
     let prevItem = null;
     let nextItem = null;
     for (let j = index - 1; j >= 0; j -= 1) {
@@ -6146,15 +6831,31 @@ function videoTransitionEvents(total) {
         break;
       }
     }
-    if (!prevItem || !nextItem) continue;
-    const timing = transitionTiming(entry);
+    const cfg = resolveTransition(entry);
+    const timing = transitionTiming(entry, index);
     if (!(timing.total > 0.05)) continue;
-    const cut = prevItem.start + prevItem.duration;
-    const from = Math.max(0, cut - timing.outHold);
-    const to = Math.min(total, cut + timing.inHold);
+    const variant = transitionVariantNumber(index);
+    let cut;
+    let from;
+    let to;
+    if (timing.mode === "open" && nextItem) {
+      cut = nextItem.start;
+      from = nextItem.start;
+      to = Math.min(total, nextItem.start + timing.inHold);
+    } else if (timing.mode === "close" && prevItem) {
+      cut = prevItem.start + prevItem.duration;
+      from = Math.max(0, cut - timing.outHold);
+      to = cut;
+    } else if (prevItem && nextItem) {
+      cut = prevItem.start + prevItem.duration;
+      from = Math.max(0, cut - timing.outHold);
+      to = Math.min(total, cut + timing.inHold);
+    } else {
+      continue;
+    }
     events.push({
       index,
-      title: entry.title || "Transition",
+      title: `${cfg.title || "Transition"} · ${variant}`,
       cut,
       from,
       to,
@@ -6505,9 +7206,8 @@ window.addEventListener("keydown", (event) => {
       render();
       return;
     }
-    if (state.regionTool || state.editTool) {
+    if (state.regionTool) {
       state.regionTool = false;
-      state.editTool = false;
       state.note = "";
       render();
       return;
@@ -6515,7 +7215,6 @@ window.addEventListener("keydown", (event) => {
     if (state.pictureExpanded) {
       state.pictureExpanded = false;
       state.regionTool = false;
-      state.editTool = false;
       render();
       return;
     }
