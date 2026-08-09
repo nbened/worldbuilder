@@ -1258,13 +1258,11 @@ button {
   position: relative;
 }
 
-.picture-expand {
+.picture-expand,
+.picture-download {
   position: absolute;
   top: 10px;
-  right: 10px;
   z-index: 5;
-  width: 28px;
-  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1276,7 +1274,20 @@ button {
   padding: 0;
 }
 
-.picture-expand:hover {
+.picture-expand {
+  right: 10px;
+  width: 28px;
+  height: 28px;
+}
+
+.picture-download {
+  left: 10px;
+  width: 28px;
+  height: 28px;
+}
+
+.picture-expand:hover,
+.picture-download:hover {
   color: var(--ink);
   background: #fff;
 }
@@ -1349,6 +1360,11 @@ button {
 .shell.is-expanded .picture-expand {
   top: 14px;
   right: 14px;
+}
+
+.shell.is-expanded .picture-download {
+  top: 14px;
+  left: 14px;
 }
 
 .picture.blank {

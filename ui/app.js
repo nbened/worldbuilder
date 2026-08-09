@@ -1086,20 +1086,6 @@ function exportActions({ sceneMode = false } = {}) {
 
   if (sceneMode) {
     const actions = [];
-    const imagePath = scene()?.image;
-    actions.push(
-      h(
-        "button",
-        {
-          class: "btn ghost",
-          type: "button",
-          disabled: !imagePath || !imageExists(imagePath),
-          title: imagePath ? `Download ${imagePath.split("/").pop()}` : "No scene image",
-          onClick: () => downloadSceneImage(),
-        },
-        "Download image"
-      )
-    );
     if (sceneOut?.ready || sceneOut?.exists) {
       actions.push(
         h(
@@ -2100,11 +2086,43 @@ function collapseIcon() {
   );
 }
 
+function downloadIcon() {
+  return h(
+    "svg",
+    {
+      class: "icon",
+      viewBox: "0 0 16 16",
+      width: "14",
+      height: "14",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.5",
+      "aria-hidden": true,
+    },
+    h("path", { d: "M8 2.5v8M5 8l3 3 3-3M3 13.5h10" })
+  );
+}
+
 function pictureStage(known, image) {
   const expanded = state.pictureExpanded;
   return h(
     "div",
     { class: `picture-frame${expanded ? " is-expanded" : ""}` },
+    known &&
+      h(
+        "button",
+        {
+          class: "picture-download",
+          type: "button",
+          title: `Download ${image.split("/").pop()}`,
+          "aria-label": "Download image",
+          onClick: (event) => {
+            event.stopPropagation();
+            downloadSceneImage();
+          },
+        },
+        downloadIcon()
+      ),
     h(
       "button",
       {
@@ -2125,7 +2143,7 @@ function pictureStage(known, image) {
       {
         class: `picture${known ? "" : " blank"}`,
         onPointerdown: (event) => {
-          if (event.target.closest(".anim-layer, .picture-expand")) return;
+          if (event.target.closest(".anim-layer, .picture-expand, .picture-download")) return;
           if (state.selectedAnim !== null) {
             state.selectedAnim = null;
             render();
@@ -2906,6 +2924,33 @@ function rewriteLocalAssetPath(from, to) {
   }
 }
 
+function selectUploadedForScene(kind, path) {
+  if (!path || state.page !== "scene") return false;
+  if (kind === "images") {
+    scene().image = path;
+    changed();
+    return true;
+  }
+  if (kind === "music") {
+    toggleSceneSong(path, true);
+    return true;
+  }
+  if (kind === "sounds") {
+    toggleSceneSound(path, true);
+    return true;
+  }
+  if (kind === "animations") {
+    toggleSceneAnim(path, true);
+    return true;
+  }
+  if (kind === "effects") {
+    if (!effectEntry(path)) sceneEffects().push({ file: path, speed: 100 });
+    changed();
+    return true;
+  }
+  return false;
+}
+
 async function uploadAsset(kind, file) {
   state.note = `Uploading ${file.name}…`;
   render();
@@ -2920,13 +2965,9 @@ async function uploadAsset(kind, file) {
     );
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Upload failed");
-    if (kind === "images" && data.path && !scene().image) scene().image = data.path;
     await refreshOutputs();
     state.note = "";
-    if (kind === "music" && data.path && state.page === "scene") {
-      toggleSceneSong(data.path, true);
-      return;
-    }
+    if (selectUploadedForScene(kind, data.path)) return;
     render();
   } catch (error) {
     state.note = error.message || "Upload failed";
