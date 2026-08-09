@@ -1621,6 +1621,16 @@ function paintPlayhead() {
       scrubber.cards?.forEach((card) =>
         card.classList.toggle("playing", Number(card.dataset.sceneIndex) === activeIndex)
       );
+      scrubber.events?.forEach((mark) => {
+        const from = Number(mark.dataset.from);
+        const to = Number(mark.dataset.to);
+        const on =
+          Number.isFinite(from) &&
+          Number.isFinite(to) &&
+          player.at >= from - 0.05 &&
+          player.at <= to + 0.05;
+        mark.classList.toggle("is-active", on);
+      });
     } else {
       const { list } = sceneSequence(state.sceneIndex);
       let songActive = -1;
@@ -3185,10 +3195,27 @@ function placeScene(fromIndex, insertAt) {
   changed();
 }
 
+function canPlaceTransitionAfter(afterSceneIndex) {
+  if (afterSceneIndex < 0) return false;
+  const list = scenes();
+  const prev = list[afterSceneIndex];
+  if (!prev || prev.is_transition) return false;
+  for (let i = afterSceneIndex + 1; i < list.length; i += 1) {
+    if (!list[i].is_transition) return true;
+  }
+  return false;
+}
+
 function placeTransitionAfter(transIndex, afterSceneIndex) {
   const list = scenes();
   const source = list[transIndex];
   if (!source?.is_transition) return;
+  if (!canPlaceTransitionAfter(afterSceneIndex)) {
+    state.placingTransition = null;
+    state.note = "Transitions must sit between two scenes";
+    render();
+    return;
+  }
   // Stamp a copy — same transition can sit between many scene pairs.
   // Audio stays on the neighboring scenes; this is a visual marker only.
   const copy = JSON.parse(JSON.stringify(source));
@@ -3197,6 +3224,7 @@ function placeTransitionAfter(transIndex, afterSceneIndex) {
   list.splice(at, 0, copy);
   state.placingTransition = null;
   state.movingScene = null;
+  state.note = "";
   changed();
 }
 
@@ -3253,13 +3281,20 @@ function sceneSlot(insertAt, fromIndex) {
 function transitionGap(gap) {
   const placing = state.placingTransition;
   if (placing !== null) {
-    return h("button", {
-      class: "transition-drop",
-      type: "button",
-      title: "Add transition here (visual only — songs stay on the scenes)",
-      "aria-label": "Add transition here",
-      onClick: () => placeTransitionAfter(placing, gap.afterIndex),
-    });
+    if (!canPlaceTransitionAfter(gap.afterIndex)) {
+      // Keep existing edge markers visible (with ×) but don't offer a drop here.
+      if (!gap.transitions.length) {
+        return h("div", { class: "transition-gap-spacer", "aria-hidden": true });
+      }
+    } else {
+      return h("button", {
+        class: "transition-drop",
+        type: "button",
+        title: "Add transition here (visual only — songs stay on the scenes)",
+        "aria-label": "Add transition here",
+        onClick: () => placeTransitionAfter(placing, gap.afterIndex),
+      });
+    }
   }
 
   if (!gap.transitions.length) {
@@ -5380,18 +5415,96 @@ function beginAnimResize(event, index) {
   handle.addEventListener("pointercancel", up);
 }
 
+/** Transition windows on the video timeline (overlay neighbors around each cut). */
+function videoTransitionEvents(total) {
+  if (!(total > 0)) return [];
+  const { items } = cachedVideoTimeline();
+  const list = scenes();
+  const events = [];
+  for (let index = 0; index < list.length; index += 1) {
+    const entry = list[index];
+    if (!entry?.is_transition) continue;
+    let prevItem = null;
+    let nextItem = null;
+    for (let j = index - 1; j >= 0; j -= 1) {
+      if (!list[j].is_transition && items[j]?.duration > 0) {
+        prevItem = items[j];
+        break;
+      }
+    }
+    for (let j = index + 1; j < list.length; j += 1) {
+      if (!list[j].is_transition && items[j]?.duration > 0) {
+        nextItem = items[j];
+        break;
+      }
+    }
+    if (!prevItem || !nextItem) continue;
+    const timing = transitionTiming(entry);
+    if (!(timing.total > 0.05)) continue;
+    const cut = prevItem.start + prevItem.duration;
+    const from = Math.max(0, cut - timing.outHold);
+    const to = Math.min(total, cut + timing.inHold);
+    events.push({
+      index,
+      title: entry.title || "Transition",
+      cut,
+      from,
+      to,
+      leftPct: (from / total) * 100,
+      widthPct: (Math.max(to - from, 0) / total) * 100,
+      cutPct: (cut / total) * 100,
+    });
+  }
+  return events;
+}
+
 function playerBar(total, mode) {
   const fill = h("div", { class: "fill" });
   const knob = h("div", { class: "knob" });
   const elapsed = h("span", { class: "meta time", text: clock(player.at) });
+  const eventMarks = [];
+  const children = [h("div", { class: "rail-fill" }, fill)];
+
+  if (mode === "video" && total > 0) {
+    videoTransitionEvents(total).forEach((ev) => {
+      children.push(
+        h("div", {
+          class: "rail-event-span is-transition",
+          style: {
+            left: `${ev.leftPct}%`,
+            width: `${Math.max(ev.widthPct, 0.35)}%`,
+          },
+          title: `${ev.title} · ${clock(ev.from)}–${clock(ev.to)}`,
+          "aria-hidden": true,
+        })
+      );
+      const mark = h("button", {
+        type: "button",
+        class: "rail-event is-transition",
+        style: { left: `${ev.cutPct}%` },
+        title: `${ev.title} — jump to transition (${clock(ev.from)})`,
+        "aria-label": `${ev.title} at ${clock(ev.cut)}`,
+        "data-from": String(ev.from),
+        "data-to": String(ev.to),
+        onPointerdown: (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          seekTo(ev.from);
+        },
+      });
+      eventMarks.push(mark);
+      children.push(mark);
+    });
+  }
+
+  children.push(knob);
   const rail = h(
     "div",
     { class: "rail", onPointerdown: (event) => beginScrub(event, rail, total) },
-    h("div", { class: "rail-fill" }, fill),
-    knob
+    ...children
   );
 
-  scrubber = { fill, knob, elapsed, rows: [], cards: [] };
+  scrubber = { fill, knob, elapsed, rows: [], cards: [], events: eventMarks };
 
   return h(
     "div",

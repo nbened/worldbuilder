@@ -2506,6 +2506,43 @@ button {
   background: var(--ink);
 }
 
+.player .rail-event-span.is-transition {
+  position: absolute;
+  top: 50%;
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 2px;
+  background: rgba(196, 85, 77, 0.38);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.player .rail-event.is-transition {
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  padding: 0;
+  border: 1.5px solid #fff;
+  border-radius: 50%;
+  background: rgba(196, 85, 77, 0.95);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  z-index: 2;
+}
+
+.player .rail-event.is-transition:hover,
+.player .rail-event.is-transition.is-active {
+  transform: scale(1.2);
+  background: rgba(175, 60, 52, 1);
+}
+
+.player .rail-event.is-transition:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
 .player .knob {
   position: absolute;
   top: 50%;
@@ -2517,6 +2554,7 @@ button {
   background: var(--ink);
   box-shadow: 0 0 0 1px rgba(15, 15, 15, 0.08);
   pointer-events: none;
+  z-index: 3;
 }
 
 .player .rail:hover .knob {

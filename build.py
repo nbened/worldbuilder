@@ -307,14 +307,21 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
 
         owned_tracks.append(None)
         title = raw.get("title", f"Scene {index}")
+        # Multi-use templates may sit anywhere in the list; only mid-gap stamps
+        # become bridges. Skip edge / adjacent markers instead of failing the mix.
         if index == 1 or index == len(raw_scenes):
-            raise BuildError(
-                f"scene {index} ({title}) is a transition and must sit between two scenes"
+            print(
+                f"warning: scene {index} ({title}) is a transition at the edge — "
+                "it needs a scene on both sides to overlay (skipped for render)",
+                file=sys.stderr,
             )
+            continue
         if flags[index - 2] or bool(raw_scenes[index].get("is_transition")):
-            raise BuildError(
-                f"scene {index} ({title}) is a transition and cannot sit next to another transition"
+            print(
+                f"warning: scene {index} ({title}) sits next to another transition — skipped",
+                file=sys.stderr,
             )
+            continue
 
         map_config = raw.get("map", {})
         if isinstance(map_config, str):
