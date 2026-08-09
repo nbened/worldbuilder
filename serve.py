@@ -95,16 +95,98 @@ def output_path(script: dict, scene: int | None = None) -> Path:
     return path
 
 
-def output_status(path: Path, script_mtime: float | None = None) -> dict:
-    """Describe a render file under out/. ready means present and not older than the script."""
+def expected_scene_duration(script: dict, scene_number: int, music: dict[str, float] | None = None) -> float | None:
+    """Expected length of a Process Scene render (no map bridges)."""
+    scenes = script.get("scenes") or []
+    if scene_number < 1 or scene_number > len(scenes):
+        return None
+    entry = scenes[scene_number - 1]
+    if entry.get("is_transition"):
+        return None
+    defaults = script.get("defaults") or {}
+    crossfade = float(defaults.get("track_crossfade", 2))
+    if music is None:
+        music = {item["path"]: item["duration"] for item in scan(ROOT / "assets" / "music", AUDIO_SUFFIXES)}
+    lengths = []
+    for track in entry.get("tracks") or []:
+        path = _track_file(track)
+        if path in music:
+            lengths.append(music[path])
+    if lengths:
+        return max(0.0, sum(lengths) - crossfade * (len(lengths) - 1))
+    if _scene_has_picture(entry):
+        return _silent_scene_hold(entry, defaults)
+    return None
+
+
+def scene_meta_path(path: Path) -> Path:
+    return Path(str(path) + ".meta.json")
+
+
+def scene_fingerprint(entry: dict) -> str:
+    """Hash of the scene object — any edit marks a prior render outdated."""
+    payload = json.dumps(entry, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def write_scene_meta(target: Path, entry: dict, scene_number: int) -> None:
+    meta = {
+        "fingerprint": scene_fingerprint(entry),
+        "scene": scene_number,
+        "title": entry.get("title") or "",
+    }
+    scene_meta_path(target).write_text(json.dumps(meta, indent=2) + "\n")
+
+
+def read_scene_meta(target: Path) -> dict | None:
+    path = scene_meta_path(target)
     if not path.exists():
-        return {"ready": False, "name": path.name, "stale": False, "exists": False}
-    stale = bool(script_mtime is not None and path.stat().st_mtime < script_mtime)
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def output_status(
+    path: Path,
+    script_mtime: float | None = None,
+    *,
+    expected_duration: float | None = None,
+    fingerprint: str | None = None,
+) -> dict:
+    """Describe a render under out/.
+
+    Scene clips: ready when the file exists, is long enough, and its sidecar
+    fingerprint still matches the current scene object (not script mtime).
+    Full video: still uses script mtime when no fingerprint is provided.
+    """
+    if not path.exists():
+        return {
+            "ready": False,
+            "name": path.name,
+            "stale": False,
+            "exists": False,
+            "incomplete": False,
+        }
+    incomplete = False
+    if expected_duration is not None and expected_duration > 2:
+        actual = probe_duration(path)
+        if actual is None or actual < max(2.0, expected_duration * 0.5):
+            incomplete = True
+    stale = False
+    if fingerprint is not None:
+        meta = read_scene_meta(path)
+        stale = not meta or meta.get("fingerprint") != fingerprint
+    elif script_mtime is not None:
+        stale = path.stat().st_mtime < script_mtime
     return {
-        "ready": not stale,
+        "ready": not stale and not incomplete,
         "name": path.name,
         "stale": stale,
         "exists": True,
+        "incomplete": incomplete,
     }
 
 
@@ -149,11 +231,16 @@ def list_videos() -> list[dict]:
         scenes = script.get("scenes", [])
         thumb = next((scene.get("image") for scene in scenes if scene.get("image")), "")
         script_mtime = path.stat().st_mtime
+        music = {item["path"]: item["duration"] for item in scan(ROOT / "assets" / "music", AUDIO_SUFFIXES)}
         video_out = output_status(output_path(script), script_mtime)
-        scene_outs = {
-            str(index): output_status(output_path(script, scene=index), script_mtime)
-            for index in range(1, len(scenes) + 1)
-        }
+        scene_outs = {}
+        for index, entry in enumerate(scenes, start=1):
+            fingerprint = None if entry.get("is_transition") else scene_fingerprint(entry)
+            scene_outs[str(index)] = output_status(
+                output_path(script, scene=index),
+                expected_duration=expected_scene_duration(script, index, music),
+                fingerprint=fingerprint,
+            )
         items.append(
             {
                 "id": path.stem,
@@ -173,11 +260,17 @@ def list_videos() -> list[dict]:
 def collect_state(script_path: Path, video_id: str) -> dict:
     script = load_script(script_path)
     script_mtime = script_path.stat().st_mtime if script_path.exists() else None
+    music = {item["path"]: item["duration"] for item in scan(ROOT / "assets" / "music", AUDIO_SUFFIXES)}
     video_out = output_status(output_path(script), script_mtime)
-    scene_outs = {
-        str(index): output_status(output_path(script, scene=index), script_mtime)
-        for index in range(1, len(script.get("scenes", [])) + 1)
-    }
+    scenes = script.get("scenes") or []
+    scene_outs = {}
+    for index, entry in enumerate(scenes, start=1):
+        fingerprint = None if entry.get("is_transition") else scene_fingerprint(entry)
+        scene_outs[str(index)] = output_status(
+            output_path(script, scene=index),
+            expected_duration=expected_scene_duration(script, index, music),
+            fingerprint=fingerprint,
+        )
     return {
         "id": video_id,
         "file": script_path.name,
@@ -289,6 +382,9 @@ class Render:
         command = [python_bin(), str(ROOT / "build.py"), str(script_path), "--progress"]
         if scene is not None:
             command += ["--scene", str(scene)]
+        else:
+            # Full video stitches pre-rendered scene clips + map transitions.
+            command += ["--assemble"]
         try:
             process = subprocess.Popen(
                 command,
@@ -326,6 +422,13 @@ class Render:
                 self.status = "idle"
                 self.message = "Stopped"
             elif code == 0 and target.exists():
+                if scene is not None:
+                    try:
+                        script = load_script(script_path)
+                        entry = (script.get("scenes") or [])[scene - 1]
+                        write_scene_meta(target, entry, scene)
+                    except (IndexError, TypeError, OSError) as exc:
+                        self.log.append(f"error: could not write scene meta: {exc}")
                 self.status, self.done, self.message = "done", self.total, "Finished"
             else:
                 self.status = "error"
@@ -841,10 +944,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": f"invalid JSON: {exc}"}, status=400)
             return
 
-        backup = path.with_suffix(".json.bak")
+        # Skip rewriting when nothing changed — a no-op save must not bump mtime,
+        # or every Process Scene/Video would mark earlier scene renders "stale".
+        text = json.dumps(script, indent=2, ensure_ascii=False) + "\n"
         if path.exists():
+            try:
+                if path.read_text() == text:
+                    self.send_json({"saved": True, "unchanged": True})
+                    return
+            except OSError:
+                pass
+            backup = path.with_suffix(".json.bak")
             shutil.copyfile(path, backup)
-        path.write_text(json.dumps(script, indent=2, ensure_ascii=False) + "\n")
+        path.write_text(text)
         self.send_json({"saved": True})
 
 

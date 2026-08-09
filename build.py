@@ -1956,6 +1956,258 @@ def build_command(
     return cmd
 
 
+def build_assemble_command(
+    scenes: list[Scene],
+    clips: list[Path],
+    total: float,
+    output: Path,
+    width: int,
+    height: int,
+    fps: int,
+    open_close_fade: float,
+    quality: dict,
+    overlays: dict | None = None,
+) -> list[str]:
+    """Stitch pre-rendered scene clips and burn map transitions on top."""
+    playable = [scene for scene in scenes if not scene.is_transition and scene.audio_duration > 0.001]
+    if len(playable) != len(clips):
+        raise BuildError("assemble clip count does not match playable scenes")
+    if not clips:
+        raise BuildError("nothing to assemble — process each scene first")
+
+    cmd: list[str] = ["ffmpeg", "-y"]
+    for clip in clips:
+        cmd += ["-i", str(clip)]
+
+    bridge_events = collect_bridge_overlays(scenes)
+    bridge_base = len(clips)
+    for event in bridge_events:
+        hold = max(float(event["duration"]), 0.1)
+        cmd += [
+            "-loop", "1",
+            "-framerate", str(fps),
+            "-t", f"{hold:.3f}",
+            "-i", str(event["image"]),
+        ]
+    bridge_anim_base = bridge_base + len(bridge_events)
+    bridge_anim_by_event: dict[int, list[tuple[int, dict]]] = {
+        i: [] for i in range(len(bridge_events))
+    }
+    bridge_anim_count = 0
+    for event_i, event in enumerate(bridge_events):
+        hold = max(float(event["duration"]), 0.1)
+        for anim in event.get("animations") or []:
+            looped = seamless_loop_clip(
+                anim["path"],
+                fps,
+                start=anim.get("loop_in"),
+                end=anim.get("loop_out"),
+            )
+            bridge_anim_by_event[event_i].append((bridge_anim_base + bridge_anim_count, anim))
+            bridge_anim_count += 1
+            cmd += ["-stream_loop", "-1", "-i", str(looped)]
+
+    overlay_base = bridge_anim_base + bridge_anim_count
+    overlay_inputs: list[tuple[dict, Path]] = []
+    for event in collect_overlay_events(scenes, overlays):
+        png = overlay_png_for(event, height)
+        overlay_inputs.append((event, png))
+        hold = max(float(event["duration"]), OVERLAY_FADE * 2 + 0.05)
+        cmd += [
+            "-loop", "1",
+            "-framerate", str(fps),
+            "-t", f"{hold:.3f}",
+            "-i", str(png),
+        ]
+
+    graph: list[str] = []
+    v_labels: list[str] = []
+    a_labels: list[str] = []
+    for index, scene in enumerate(playable):
+        duration = max(scene.audio_duration, 0.1)
+        v_label = f"cv{index}"
+        a_label = f"ca{index}"
+        graph.append(
+            f"[{index}:v]fps={fps},"
+            f"scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop={width}:{height},setsar=1,format=yuv420p,"
+            f"trim=duration={duration:.3f},setpts=PTS-STARTPTS[{v_label}]"
+        )
+        graph.append(
+            f"[{index}:a]aresample=48000,"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"atrim=duration={duration:.3f},apad=whole_dur={duration:.3f},"
+            f"asetpts=PTS-STARTPTS[{a_label}]"
+        )
+        v_labels.append(v_label)
+        a_labels.append(a_label)
+
+    if len(v_labels) == 1:
+        video_out = f"[{v_labels[0]}]"
+        audio_out = a_labels[0]
+    else:
+        joined_v = "".join(f"[{label}]" for label in v_labels)
+        joined_a = "".join(f"[{label}]" for label in a_labels)
+        graph.append(f"{joined_v}concat=n={len(v_labels)}:v=1:a=0[vcat]")
+        graph.append(f"{joined_a}concat=n={len(a_labels)}:v=0:a=1[acat]")
+        video_out = "[vcat]"
+        audio_out = "acat"
+
+    graph.append(
+        f"{video_out}trim=duration={total:.3f},setpts=PTS-STARTPTS,"
+        f"fade=t=in:st=0:d={open_close_fade:.3f},"
+        f"fade=t=out:st={max(total - open_close_fade, 0):.3f}:d={open_close_fade:.3f}[vbase]"
+    )
+    graph.append(
+        f"[{audio_out}]atrim=duration={total:.3f},asetpts=PTS-STARTPTS,"
+        f"afade=t=in:st=0:d={open_close_fade:.3f},"
+        f"afade=t=out:st={max(total - open_close_fade, 0):.3f}:d={open_close_fade:.3f}[a]"
+    )
+
+    current = "vbase"
+    for step, event in enumerate(bridge_events):
+        input_index = bridge_base + step
+        start = max(0.0, float(event["start"]))
+        duration = float(event["duration"])
+        fade_in = min(float(event["fade_in"]), max(0.0, duration * 0.45))
+        fade_out = min(float(event["fade_out"]), max(0.0, duration * 0.45))
+        if fade_in + fade_out > duration:
+            fade_out = max(0.0, duration - fade_in)
+        anims = bridge_anim_by_event.get(step) or []
+        zoom_chain = bridge_map_filter(
+            width=width,
+            height=height,
+            fps=fps,
+            duration=duration,
+            fade_in=fade_in,
+            fade_out=fade_out,
+            style=str(event.get("style") or "fade"),
+            zoom=event.get("zoom"),
+            zoom_dir=str(event.get("zoom_dir") or "in"),
+            zoom_span=float(event.get("zoom_span") or 0),
+            zoom_start=event.get("zoom_start"),
+            zoom_out_span=float(event.get("zoom_out_span") or 0),
+            include_fps=not anims,
+        )
+        ov = f"map{step}"
+        out = f"vm{step}"
+        if not anims:
+            graph.append(
+                f"[{input_index}:v]{zoom_chain},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
+            )
+        else:
+            mw, mh = image_size(Path(event["image"]))
+            base = f"bm{step}x0"
+            graph.append(
+                f"[{input_index}:v]fps={fps},"
+                f"trim=duration={duration:.3f},setpts=PTS-STARTPTS,"
+                f"scale={mw}:{mh}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={mw}:{mh},setsar=1,format=rgba[{base}]"
+            )
+            layer = base
+            for anim_step, (anim_index, anim) in enumerate(anims):
+                rate = max(0.1, min(float(anim.get("speed", 100)) / 100.0, 4.0))
+                aw = max(2, int(round(mw * max(0.05, min(anim["w"], 1.0)) / 2) * 2))
+                ax = int(round(mw * max(0.0, min(anim["x"], 1.0))))
+                ay = int(round(mh * max(0.0, min(anim["y"], 1.0))))
+                ah = anim.get("h")
+                aspect = anim.get("aspect", "native")
+                if ah is not None and float(ah) > 0:
+                    ah = max(2, int(round(mh * max(0.05, min(float(ah), 1.0)) / 2) * 2))
+                elif aspect == "portrait":
+                    ah = max(2, int(round(aw * 16 / 9 / 2) * 2))
+                elif aspect == "landscape":
+                    ah = max(2, int(round(aw * 9 / 16 / 2) * 2))
+                else:
+                    ah = -2
+                if ah <= 0:
+                    scale = f"scale={aw}:-2:flags=lanczos,setsar=1"
+                else:
+                    scale = (
+                        f"scale={aw}:{ah}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                        f"pad={aw}:{ah}:(ow-iw)/2:(oh-ih)/2:color=0x00000000,setsar=1"
+                    )
+                eq_parts = []
+                eq_bri = float(anim.get("brightness", 100)) / 100.0
+                eq_sat = float(anim.get("saturation", 100)) / 100.0
+                if abs(eq_bri - 1.0) > 0.001:
+                    eq_parts.append(f"brightness={eq_bri - 1.0:.4f}")
+                if abs(eq_sat - 1.0) > 0.001:
+                    eq_parts.append(f"saturation={eq_sat:.4f}")
+                bright_filter = f",eq={':'.join(eq_parts)}" if eq_parts else ""
+                if anim.get("soft_edges"):
+                    pix = (
+                        "format=rgba,"
+                        "geq="
+                        "r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
+                        "a='min(min(255*min(X\\,W-1-X)/(0.12*W)\\,"
+                        "255*min(Y\\,H-1-Y)/(0.12*H))\\,255)'"
+                    )
+                else:
+                    pix = "format=rgba"
+                an = f"ba{step}x{anim_step}"
+                nxt = f"bm{step}x{anim_step + 1}"
+                graph.append(
+                    f"[{anim_index}:v]fps={fps},"
+                    f"setpts=PTS/{rate:.4f},"
+                    f"trim=duration={duration:.3f},setpts=PTS-STARTPTS,"
+                    f"{scale}{bright_filter},"
+                    f"{pix}[{an}]"
+                )
+                graph.append(
+                    f"[{layer}][{an}]overlay="
+                    f"x='min({ax}\\,main_w-overlay_w)':y='min({ay}\\,main_h-overlay_h)':"
+                    f"shortest=1:format=auto[{nxt}]"
+                )
+                layer = nxt
+            graph.append(
+                f"[{layer}]{zoom_chain},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
+            )
+        graph.append(
+            f"[{current}][{ov}]overlay=0:0:eof_action=pass:format=auto[{out}]"
+        )
+        current = out
+
+    for step, (event, _png) in enumerate(overlay_inputs):
+        input_index = overlay_base + step
+        start = max(0.0, float(event["start"]))
+        duration = float(event["duration"])
+        ov_fade = min(OVERLAY_FADE, max(0.05, duration * 0.45))
+        out_start = max(0.0, duration - ov_fade)
+        ax = int(round(width * max(0.0, min(event["x"], 1.0))))
+        ay = int(round(height * max(0.0, min(event["y"], 1.0))))
+        ov = f"ov{step}"
+        out = f"vo{step}"
+        graph.append(
+            f"[{input_index}:v]fps={fps},format=rgba,"
+            f"fade=t=in:st=0:d={ov_fade:.3f}:alpha=1,"
+            f"fade=t=out:st={out_start:.3f}:d={ov_fade:.3f}:alpha=1,"
+            f"setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
+        )
+        graph.append(
+            f"[{current}][{ov}]overlay="
+            f"x='min({ax}\\,main_w-overlay_w)':y='min({ay}\\,main_h-overlay_h)':"
+            f"eof_action=pass:format=auto[{out}]"
+        )
+        current = out
+
+    graph.append(f"[{current}]format=yuv420p,trim=duration={total:.3f},setpts=PTS-STARTPTS[v]")
+
+    cmd += [
+        "-filter_complex", ";".join(graph),
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264",
+        "-preset", quality["preset"],
+        "-crf", str(quality["crf"]),
+        "-pix_fmt", "yuv420p",
+        "-r", str(fps),
+        "-c:a", "aac", "-b:a", quality["audio_bitrate"],
+        "-movflags", "+faststart",
+        str(output),
+    ]
+    return cmd
+
+
 def run_ffmpeg(command: list[str], total: float, machine_readable: bool = False) -> int:
     """Run the render, optionally reporting progress for the editor to read."""
     if not machine_readable:
@@ -1995,6 +2247,24 @@ def print_timeline(scenes: list[Scene], total: float) -> None:
     print(f"\nTotal runtime: {timecode(total)} ({total / 60:.1f} min)\n")
 
 
+def write_scene_render_meta(script_path: Path, scene_number: int, output: Path) -> None:
+    """Persist a fingerprint of the scene object next to the clip for Ready/Outdated."""
+    try:
+        script = json.loads(script_path.read_text())
+        entry = (script.get("scenes") or [])[scene_number - 1]
+    except (OSError, json.JSONDecodeError, IndexError, TypeError):
+        return
+    if not isinstance(entry, dict):
+        return
+    payload = json.dumps(entry, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    meta = {
+        "fingerprint": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        "scene": scene_number,
+        "title": entry.get("title") or "",
+    }
+    Path(str(output) + ".meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+
+
 def write_chapters(scenes: list[Scene], path: Path) -> None:
     lines = []
     for scene in scenes:
@@ -2011,6 +2281,11 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="validate and print the timeline, render nothing")
     parser.add_argument("--preview", action="store_true", help="quick low-resolution draft")
     parser.add_argument("--scene", type=int, help="render a single scene by number")
+    parser.add_argument(
+        "--assemble",
+        action="store_true",
+        help="stitch pre-rendered scene clips and burn map transitions on top",
+    )
     parser.add_argument("--output", type=Path, help="override the output file")
     parser.add_argument("--print-command", action="store_true", help="show the ffmpeg command")
     parser.add_argument("--progress", action="store_true", help="print machine-readable progress")
@@ -2021,6 +2296,13 @@ def main() -> int:
         if not shutil.which(tool):
             print(f"error: {tool} is not installed (brew install ffmpeg)", file=sys.stderr)
             return 1
+
+    if args.assemble and args.scene is not None:
+        print("error: use --assemble or --scene, not both", file=sys.stderr)
+        return 1
+    if args.assemble and args.audio:
+        print("error: --assemble cannot be combined with --audio", file=sys.stderr)
+        return 1
 
     try:
         script, scenes, total = load_script(args.script)
@@ -2036,7 +2318,7 @@ def main() -> int:
         if chosen[0].is_transition:
             print(
                 f"error: scene {args.scene} ({chosen[0].title}) is a transition — "
-                "it overlays neighboring scenes. Process those scenes or the full video.",
+                "map bridges only render in the full video. Use Process Video.",
                 file=sys.stderr,
             )
             return 1
@@ -2046,6 +2328,9 @@ def main() -> int:
         scenes[0].start = 0.0
         for segment in scenes[0].segments:
             segment.start -= offset
+        # Scene-only renders are the picture + songs — map transitions belong in
+        # Process Video, otherwise Download Scene opens on the map bridge.
+        scenes[0].bridge_overlays = []
         if total <= 0 or not scenes[0].segments:
             print(
                 f"error: scene {args.scene} ({scenes[0].title}) has nothing to render — "
@@ -2076,23 +2361,61 @@ def main() -> int:
         output = args.audio
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    assemble_clips: list[Path] = []
+    if args.assemble:
+        # Final output path is `out/foo.mp4`; clips live beside it as foo-sceneN.mp4.
+        base = output
+        playable = [
+            scene for scene in scenes if not scene.is_transition and scene.audio_duration > 0.001
+        ]
+        for scene in playable:
+            clip = base.with_name(f"{base.stem}-scene{scene.index}{base.suffix}")
+            if not clip.exists():
+                print(
+                    f"error: missing scene clip for {scene.title!r} ({clip.name}) — "
+                    "Process Scene first",
+                    file=sys.stderr,
+                )
+                return 1
+            assemble_clips.append(clip)
+
     print(f"{script.get('project', args.script.stem)} — {len(scenes)} scene(s)")
     print_timeline(scenes, total)
 
-    command = build_command(
-        scenes,
-        total,
-        output,
-        width=width,
-        height=height,
-        fps=fps,
-        fade=float(defaults.get("fade_seconds", 3)),
-        track_crossfade=float(defaults.get("track_crossfade", 2)),
-        open_close_fade=float(defaults.get("open_close_fade", 2)),
-        quality=quality,
-        audio_only=bool(args.audio),
-        overlays=script.get("overlays"),
-    )
+    # Scene downloads skip episode open/close fades so assemble can hard-cut cleanly.
+    open_close = 0.0 if args.scene is not None else float(defaults.get("open_close_fade", 2))
+    if args.assemble:
+        try:
+            command = build_assemble_command(
+                scenes,
+                assemble_clips,
+                total,
+                output,
+                width=width,
+                height=height,
+                fps=fps,
+                open_close_fade=open_close,
+                quality=quality,
+                overlays=script.get("overlays"),
+            )
+        except BuildError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    else:
+        command = build_command(
+            scenes,
+            total,
+            output,
+            width=width,
+            height=height,
+            fps=fps,
+            fade=float(defaults.get("fade_seconds", 3)),
+            track_crossfade=float(defaults.get("track_crossfade", 2)),
+            open_close_fade=open_close,
+            quality=quality,
+            audio_only=bool(args.audio),
+            overlays=script.get("overlays"),
+        )
 
     if args.print_command:
         print(shlex.join(command), "\n")
@@ -2100,7 +2423,7 @@ def main() -> int:
     if args.check:
         return 0
 
-    label = "audio" if args.audio else f"{width}x{height}"
+    label = "audio" if args.audio else ("assemble" if args.assemble else f"{width}x{height}")
     print(f"Rendering {label} to {output} …")
     code = run_ffmpeg(command, total, machine_readable=args.progress)
     if code != 0:
@@ -2110,6 +2433,8 @@ def main() -> int:
         print(f"Done: {output}")
         return 0
 
+    if args.scene is not None:
+        write_scene_render_meta(args.script, args.scene, output)
     if args.scene is None:
         chapters = output.with_name(f"{output.stem}-chapters.txt")
         write_chapters(scenes, chapters)

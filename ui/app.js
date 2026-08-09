@@ -11,6 +11,8 @@ const state = {
   selectedOverlay: null, // "credit" | "now_playing" | null
   outputs: { video: { ready: false }, scenes: {} },
   render: { status: "idle", percent: 0, ready: false },
+  /** Bottom-right process panel: { open, jobs[], cancelling } or null */
+  processPanel: null,
   sceneIndex: 0,
   saving: false,
   note: "",
@@ -2582,13 +2584,41 @@ function hasOutput(output) {
   return Boolean(output?.exists || output?.ready);
 }
 
-function outputTag(output) {
-  if (!hasOutput(output)) return null;
-  return h("span", {
-    class: "ready-tag is-ready",
-    text: "Rendered",
-    title: output.name ? `Saved as out/${output.name}` : "Ready to stitch",
-  });
+/** Fresh render on disk (missing, stale, or truncated → not ready). */
+function outputReady(output) {
+  return Boolean(output?.ready);
+}
+
+function outputTag(output, { showMissing = false } = {}) {
+  if (outputReady(output)) {
+    return h("span", {
+      class: "ready-tag is-ready",
+      text: "Rendered",
+      title: output.name ? `Saved as out/${output.name}` : "Ready to download",
+    });
+  }
+  if (output?.incomplete) {
+    return h("span", {
+      class: "ready-tag is-outdated",
+      text: "Incomplete",
+      title: "Render was cut short — process this scene again",
+    });
+  }
+  if (output?.exists || output?.stale) {
+    return h("span", {
+      class: "ready-tag is-outdated",
+      text: "Outdated",
+      title: "Scene changed since this render — process again",
+    });
+  }
+  if (showMissing) {
+    return h("span", {
+      class: "ready-tag is-missing",
+      text: "Never rendered",
+      title: "Process this scene to create a downloadable clip",
+    });
+  }
+  return null;
 }
 
 function sceneOutput(index) {
@@ -2598,9 +2628,9 @@ function sceneOutput(index) {
 function videoOutputSummary(video) {
   const outputs = video.outputs || {};
   const full = outputs.video;
-  if (hasOutput(full)) return outputTag(full);
+  if (outputReady(full)) return outputTag(full);
   const scenes = Object.values(outputs.scenes || {});
-  const rendered = scenes.filter((scene) => hasOutput(scene)).length;
+  const rendered = scenes.filter((scene) => outputReady(scene)).length;
   if (rendered > 0) {
     return h("span", {
       class: "ready-tag is-ready",
@@ -2641,10 +2671,37 @@ async function refreshOutputs() {
 }
 
 let lastRenderStatus = "idle";
+/** Wall-clock seconds per 1% of a render job — kept across Process Video queue steps. */
+let renderPace = null;
 
 function resetRenderEta() {
   renderEtaSamples = [];
+  renderPace = null;
   state.renderEta = null;
+}
+
+/** Start ETA for a render; keep learned pace when chaining Process Video jobs. */
+function beginRenderEta() {
+  renderEtaSamples = [];
+  if (state.processPanel?.open && renderPace != null) {
+    state.renderEta = estimateRenderEta(0);
+  } else if (!state.processPanel?.open) {
+    renderPace = null;
+    state.renderEta = null;
+  } else {
+    state.renderEta = null;
+  }
+}
+
+function paceFromSamples(samples) {
+  if (!samples || samples.length < 2) return null;
+  const window = samples.length >= 4 ? samples.slice(-8) : samples;
+  const first = window[0];
+  const last = window[window.length - 1];
+  const dp = last.percent - first.percent;
+  const dt = (last.t - first.t) / 1000;
+  if (dp < 0.4 || dt < 1) return null;
+  return dt / dp;
 }
 
 function noteRenderProgress(percent) {
@@ -2655,19 +2712,53 @@ function noteRenderProgress(percent) {
     renderEtaSamples.push({ t: now, percent: value });
     if (renderEtaSamples.length > 40) renderEtaSamples.shift();
   }
+  const measured = paceFromSamples(renderEtaSamples);
+  if (measured != null) renderPace = measured;
   state.renderEta = estimateRenderEta(value);
 }
 
 function estimateRenderEta(percent) {
   if (percent >= 99) return 0;
-  if (renderEtaSamples.length < 2) return null;
-  const samples = renderEtaSamples.length >= 4 ? renderEtaSamples.slice(-8) : renderEtaSamples;
-  const first = samples[0];
-  const last = samples[samples.length - 1];
-  const dp = last.percent - first.percent;
-  const dt = (last.t - first.t) / 1000;
-  if (dp < 0.4 || dt < 1) return null;
-  return Math.max(0, (100 - percent) / (dp / dt));
+  const measured = paceFromSamples(renderEtaSamples);
+  if (measured != null) renderPace = measured;
+  if (renderPace == null) return null;
+  return Math.max(0, (100 - percent) * renderPace);
+}
+
+/** Duration left for one queue row alone (running = leftover %, pending = full job). */
+function jobDurationSeconds(job) {
+  if (renderPace == null) return null;
+  if (job.status === "running") {
+    return Math.max(0, (100 - (state.render.percent || 0)) * renderPace);
+  }
+  if (job.status === "pending" && (job.kind === "scene" || job.kind === "video")) {
+    return 100 * renderPace;
+  }
+  return null;
+}
+
+/**
+ * When this row finishes, from now — sums earlier remaining/pending jobs + this one.
+ * (An 8‑min job behind another 8‑min job is ~16 min, not ~8.)
+ */
+function jobFinishEtaSeconds(job) {
+  const panel = state.processPanel;
+  if (!panel?.open || renderPace == null) return jobDurationSeconds(job);
+  let sum = 0;
+  for (const entry of panel.jobs) {
+    const duration = jobDurationSeconds(entry);
+    if (duration == null) continue;
+    sum += duration;
+    if (entry.key === job.key) return sum;
+  }
+  return null;
+}
+
+/** Whole Process Video queue remaining (current + pending jobs). */
+function queueEtaSeconds() {
+  const panel = state.processPanel;
+  if (!panel?.open || renderPace == null) return state.renderEta;
+  return panel.jobs.reduce((sum, job) => sum + (jobDurationSeconds(job) || 0), 0);
 }
 
 function formatClockTime(date) {
@@ -2691,7 +2782,7 @@ function formatRenderEta(seconds) {
 async function generate(sceneNumber = null) {
   clearTimeout(saveTimer);
   await save();
-  resetRenderEta();
+  beginRenderEta();
   const response = await fetch(withVideo("/api/render"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2699,9 +2790,14 @@ async function generate(sceneNumber = null) {
   });
   state.render = await response.json();
   lastRenderStatus = state.render.status;
-  if (state.render.status === "running") noteRenderProgress(state.render.percent || 0);
-  render();
-  poll();
+  if (state.render.status === "running") {
+    noteRenderProgress(state.render.percent || 0);
+    render();
+    poll();
+    return;
+  }
+  // Start failed (busy / validation) — settle the queue job if any.
+  await finishProcessJob(state.render.status === "error" ? "error" : "idle");
 }
 
 async function stopGenerate() {
@@ -2709,13 +2805,417 @@ async function stopGenerate() {
   state.render = await response.json();
   lastRenderStatus = state.render.status;
   resetRenderEta();
+  if (state.processPanel?.open) {
+    state.processPanel.cancelling = true;
+  }
+  // Poll may already be mid-flight; also settle here so Cancel isn't stuck.
+  await finishProcessJob("idle");
+}
+
+/** Build Process Video queue: catch up stale/missing scenes, always full video. */
+function buildProcessJobs() {
+  const jobs = [];
+  scenes().forEach((entry, index) => {
+    if (entry.is_transition) {
+      jobs.push({
+        key: `transition-${index}`,
+        label: entry.title?.trim() || "Transition",
+        kind: "transition",
+        status: "bundled",
+        detail: "Renders with full video",
+      });
+      return;
+    }
+    const ready = outputReady(sceneOutput(index));
+    jobs.push({
+      key: `scene-${index}`,
+      label: entry.title?.trim() || `Scene ${index + 1}`,
+      kind: "scene",
+      scene: index + 1,
+      status: ready ? "done" : "pending",
+      preexisting: ready,
+    });
+  });
+  jobs.push({
+    key: "video",
+    label: "Full video",
+    kind: "video",
+    status: "pending",
+    detail: "Stitches scene clips + map transitions",
+  });
+  return jobs;
+}
+
+async function startProcessVideo() {
+  if (state.render.status === "running" && state.render.video === state.videoId) return;
+  const { total } = videoTimeline();
+  if (!total) return;
+  clearTimeout(saveTimer);
+  await save();
+  await refreshOutputs();
+  resetRenderEta();
+  state.processPanel = {
+    open: true,
+    jobs: buildProcessJobs(),
+    cancelling: false,
+  };
   render();
+  await advanceProcessQueue();
+}
+
+async function advanceProcessQueue() {
+  const panel = state.processPanel;
+  if (!panel?.open) return;
+
+  if (panel.cancelling) {
+    panel.jobs.forEach((job) => {
+      if (job.status === "pending") job.status = "cancelled";
+      if (job.kind === "transition" && job.status === "bundled") job.status = "cancelled";
+    });
+    panel.cancelling = false;
+    render();
+    return;
+  }
+
+  const next = panel.jobs.find(
+    (job) => job.status === "pending" && (job.kind === "scene" || job.kind === "video")
+  );
+  if (!next) {
+    render();
+    return;
+  }
+
+  next.status = "running";
+  beginRenderEta();
+  render();
+  await generate(next.kind === "scene" ? next.scene : null);
+}
+
+async function finishProcessJob(status) {
+  const panel = state.processPanel;
+  if (!panel?.open) {
+    // Process Scene / standalone renders still need a UI refresh.
+    render();
+    return;
+  }
+
+  const running = panel.jobs.find((job) => job.status === "running");
+  if (!running) {
+    if (panel.cancelling) await advanceProcessQueue();
+    else render();
+    return;
+  }
+
+  if (status === "done") {
+    running.status = "done";
+    const finishedVideo = running.kind === "video";
+    if (finishedVideo) {
+      panel.jobs.forEach((job) => {
+        if (job.kind === "transition" && job.status === "bundled") job.status = "done";
+      });
+    }
+    render();
+    await advanceProcessQueue();
+    if (finishedVideo && outputReady(state.outputs?.video)) {
+      downloadOutput();
+    }
+    return;
+  }
+
+  running.status = status === "error" ? "error" : "cancelled";
+  panel.jobs.forEach((job) => {
+    if (job.status === "pending") job.status = "cancelled";
+    if (job.kind === "transition" && job.status === "bundled") job.status = "cancelled";
+  });
+  panel.cancelling = false;
+  resetRenderEta();
+  render();
+}
+
+async function cancelProcessQueue() {
+  const panel = state.processPanel;
+  if (!panel?.open) return;
+  panel.cancelling = true;
+  if (state.render.status === "running" && state.render.video === state.videoId) {
+    await stopGenerate();
+    return;
+  }
+  await advanceProcessQueue();
+}
+
+function closeProcessPanel() {
+  const panel = state.processPanel;
+  if (!panel?.open) return;
+  if (panel.jobs.some((job) => job.status === "running")) return;
+  state.processPanel = null;
+  resetRenderEta();
+  render();
+}
+
+function processPanelMark(job) {
+  if (job.status === "done") return "✓";
+  if (job.status === "running") return "…";
+  if (job.status === "error") return "!";
+  if (job.status === "cancelled") return "–";
+  if (job.status === "bundled") return "○";
+  return "○";
+}
+
+function processPanelMeta(job) {
+  if (job.status === "running") {
+    const pct = state.render.percent || 0;
+    const seconds = jobFinishEtaSeconds(job);
+    return seconds == null ? `${pct}%` : `${pct}% · ${formatRenderEta(seconds)}`;
+  }
+  if (job.status === "pending" && (job.kind === "scene" || job.kind === "video")) {
+    const seconds = jobFinishEtaSeconds(job);
+    return seconds == null ? "Queued" : formatRenderEta(seconds);
+  }
+  if (job.status === "done") {
+    return job.preexisting ? "Ready — using saved clip" : "Done";
+  }
+  if (job.status === "error") return state.render.message || "Failed";
+  if (job.status === "cancelled") return "Cancelled";
+  if (job.status === "bundled") return job.detail || "With full video";
+  return job.detail || "Queued";
+}
+
+function processPanelView() {
+  const panel = state.processPanel;
+  if (!panel?.open) return null;
+
+  const jobs = panel.jobs;
+  const running = jobs.some((job) => job.status === "running");
+  const failed = jobs.some((job) => job.status === "error");
+  const cancelled = !running && jobs.some((job) => job.status === "cancelled");
+  const complete =
+    !running &&
+    !failed &&
+    !cancelled &&
+    jobs
+      .filter((job) => job.kind === "scene" || job.kind === "video")
+      .every((job) => job.status === "done") &&
+    jobs
+      .filter((job) => job.kind === "transition")
+      .every((job) => job.status === "done" || job.status === "bundled");
+  const videoReady = outputReady(state.outputs?.video);
+  const totalSeconds = running ? queueEtaSeconds() : null;
+
+  let title = "Processing…";
+  if (complete) title = "Processing complete";
+  else if (failed) title = "Processing failed";
+  else if (cancelled) title = "Processing cancelled";
+
+  return h(
+    "aside",
+    {
+      class: "process-panel",
+      role: "status",
+      "aria-live": "polite",
+      "aria-label": title,
+    },
+    h(
+      "div",
+      { class: "process-panel-head" },
+      h("strong", { class: "process-panel-title", text: title }),
+      !running &&
+        h(
+          "button",
+          {
+            class: "process-panel-close",
+            type: "button",
+            title: "Close",
+            "aria-label": "Close",
+            onClick: () => closeProcessPanel(),
+            text: "×",
+          }
+        )
+    ),
+    h(
+      "ul",
+      { class: "process-panel-list" },
+      jobs.map((job) =>
+        h(
+          "li",
+          {
+            class: [
+              "process-panel-item",
+              `is-${job.status}`,
+              job.kind === "transition" ? "is-transition" : "",
+            ]
+              .filter(Boolean)
+              .join(" "),
+          },
+          h("span", {
+            class: "process-panel-mark",
+            "aria-hidden": true,
+            text: processPanelMark(job),
+          }),
+          h(
+            "span",
+            { class: "process-panel-copy" },
+            h("span", { class: "process-panel-label", text: job.label }),
+            h("span", { class: "process-panel-meta", text: processPanelMeta(job) })
+          )
+        )
+      )
+    ),
+    running &&
+      h(
+        "div",
+        { class: "process-panel-bar" },
+        h("div", {
+          class: "fill",
+          style: { width: `${Math.min(100, state.render.percent || 0)}%` },
+        })
+      ),
+    h(
+      "div",
+      { class: "process-panel-actions" },
+      running &&
+        totalSeconds != null &&
+        h("span", {
+          class: "process-panel-total",
+          text: formatRenderEta(totalSeconds),
+          title: "Total time left for all remaining steps",
+        }),
+      running
+        ? h(
+            "button",
+            {
+              class: "btn stop",
+              type: "button",
+              onClick: () => cancelProcessQueue(),
+              text: "Cancel",
+            }
+          )
+        : null,
+      !running &&
+        videoReady &&
+        h(
+          "button",
+          {
+            class: "btn primary",
+            type: "button",
+            onClick: () => downloadOutput(),
+            text: "Download video",
+          }
+        ),
+      !running &&
+        !videoReady &&
+        h(
+          "button",
+          {
+            class: "btn ghost",
+            type: "button",
+            onClick: () => closeProcessPanel(),
+            text: "Close",
+          }
+        )
+    )
+  );
 }
 
 function downloadOutput(sceneNumber = null) {
   let url = `/download?v=${encodeURIComponent(state.videoId)}`;
   if (sceneNumber) url += `&scene=${sceneNumber}`;
   window.location.href = url;
+}
+
+/** Debug: save a JSON snapshot of the scene or full script. */
+function downloadJsonObject(data, filename) {
+  const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function moreDotsIcon() {
+  return h(
+    "svg",
+    {
+      class: "icon",
+      viewBox: "0 0 16 16",
+      width: "14",
+      height: "14",
+      fill: "currentColor",
+      "aria-hidden": true,
+    },
+    h("circle", { cx: "8", cy: "3", r: "1.25" }),
+    h("circle", { cx: "8", cy: "8", r: "1.25" }),
+    h("circle", { cx: "8", cy: "13", r: "1.25" })
+  );
+}
+
+function debugObjectMenu({ getObject, filename, title = "Download object" }) {
+  return h(
+    "div",
+    { class: "debug-menu" },
+    h(
+      "button",
+      {
+        class: "btn ghost icon-btn",
+        type: "button",
+        title: "More",
+        "aria-label": "More options",
+        "aria-haspopup": "menu",
+        onClick: (event) => {
+          event.stopPropagation();
+          const root = event.currentTarget.closest(".debug-menu");
+          const open = root.classList.toggle("is-open");
+          if (open) {
+            const close = (next) => {
+              if (root.contains(next.target)) return;
+              root.classList.remove("is-open");
+              document.removeEventListener("pointerdown", close, true);
+            };
+            document.addEventListener("pointerdown", close, true);
+          }
+        },
+      },
+      moreDotsIcon()
+    ),
+    h(
+      "div",
+      { class: "debug-menu-panel", role: "menu" },
+      h(
+        "button",
+        {
+          class: "debug-menu-item",
+          type: "button",
+          role: "menuitem",
+          onClick: (event) => {
+            event.stopPropagation();
+            downloadJsonObject(getObject(), filename);
+            event.currentTarget.closest(".debug-menu")?.classList.remove("is-open");
+          },
+          text: title,
+        }
+      )
+    )
+  );
+}
+
+function sceneObjectFilename(index = state.sceneIndex) {
+  const entry = scenes()[index] || {};
+  const slug = (entry.title || `scene-${index + 1}`)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `${state.videoId || "video"}-${slug || `scene-${index + 1}`}.json`;
+}
+
+function videoObjectFilename() {
+  const slug = (state.script?.project || state.videoId || "video")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `${slug || "video"}.json`;
 }
 
 function downloadSceneImage() {
@@ -2732,16 +3232,29 @@ function poll() {
     lastRenderStatus = state.render.status;
     if (state.render.status === "running") {
       noteRenderProgress(state.render.percent || 0);
+      render();
+      poll();
+      return;
     }
     if (state.render.status === "done") {
-      resetRenderEta();
+      // Keep pace across Process Video steps; only drop the per-job sample window.
+      if (state.processPanel?.open) beginRenderEta();
+      else resetRenderEta();
       await refreshOutputs();
+      await finishProcessJob("done");
+      return;
     }
-    if (state.render.status === "error" || state.render.status === "idle") {
+    if (state.render.status === "error") {
       resetRenderEta();
+      await finishProcessJob("error");
+      return;
+    }
+    if (state.render.status === "idle") {
+      resetRenderEta();
+      await finishProcessJob("idle");
+      return;
     }
     render();
-    if (state.render.status === "running") poll();
   }, 500);
 }
 
@@ -2786,7 +3299,7 @@ function topbar(actions = []) {
 }
 
 function sceneDownloadIconButton(sceneNumber, sceneOut) {
-  const ready = hasOutput(sceneOut);
+  const ready = outputReady(sceneOut);
   return h(
     "button",
     {
@@ -2804,6 +3317,10 @@ function sceneDownloadIconButton(sceneNumber, sceneOut) {
   );
 }
 
+function sceneDisplayName(index = state.sceneIndex) {
+  return (scenes()[index]?.title || "").trim() || `Scene ${index + 1}`;
+}
+
 function exportActions({ sceneMode = false } = {}) {
   const busy = state.render.status === "running" && state.render.video === state.videoId;
   const { total } = videoTimeline();
@@ -2812,35 +3329,45 @@ function exportActions({ sceneMode = false } = {}) {
   const sceneOut = sceneOutput(state.sceneIndex);
   const videoOut = state.outputs?.video;
   const transition = sceneMode && isTransitionScene();
+  const sceneName = sceneDisplayName();
+  // Top-right order: status · ⋮ · download · Process
+  const sceneDebug = debugObjectMenu({
+    getObject: () => structuredClone(scenes()[state.sceneIndex] || {}),
+    filename: sceneObjectFilename(),
+  });
+  const videoDebug = debugObjectMenu({
+    getObject: () => structuredClone(state.script || {}),
+    filename: videoObjectFilename(),
+  });
 
   if (busy) {
+    const renderingName =
+      state.render.kind === "scene" && state.render.scene
+        ? sceneDisplayName(state.render.scene - 1)
+        : sceneName;
     const label =
       state.render.kind === "scene"
-        ? `Stop scene ${state.render.percent}%`
-        : `Stop video ${state.render.percent}%`;
+        ? `Stop processing '${renderingName}' ${state.render.percent}%`
+        : `Stop processing video ${state.render.percent}%`;
     const actions = [];
     if (sceneMode && !transition) {
+      actions.push(outputTag(sceneOut, { showMissing: true }));
+    }
+    actions.push(sceneMode ? sceneDebug : videoDebug);
+    if (sceneMode && !transition) {
       actions.push(sceneDownloadIconButton(sceneNumber, sceneOut));
-    } else if (!sceneMode && hasOutput(videoOut)) {
-      actions.push(
-        h(
-          "button",
-          {
-            class: "btn ghost",
-            type: "button",
-            title: videoOut.name || "Download video",
-            "aria-label": "Download video",
-            onClick: () => downloadOutput(),
-          },
-          "Download"
-        )
-      );
+    } else if (!sceneMode) {
+      actions.push(downloadVideoControl());
     }
     actions.push(
       h("span", {
         class: "meta render-eta",
-        text: formatRenderEta(state.renderEta),
-        title: "Estimated time left and finish time",
+        text: formatRenderEta(
+          state.processPanel?.open ? queueEtaSeconds() : state.renderEta
+        ),
+        title: state.processPanel?.open
+          ? "Estimated time left for the full process queue"
+          : "Estimated time left and finish time",
       })
     );
     actions.push(
@@ -2850,50 +3377,36 @@ function exportActions({ sceneMode = false } = {}) {
           class: "btn stop",
           type: "button",
           title: "Stop rendering",
-          onClick: () => stopGenerate(),
+          onClick: () =>
+            state.processPanel?.open ? cancelProcessQueue() : stopGenerate(),
           text: label,
         }
       )
     );
-    return actions;
+    return actions.filter(Boolean);
   }
 
   if (sceneMode) {
     return [
+      !transition && outputTag(sceneOut, { showMissing: true }),
+      sceneDebug,
+      !transition && sceneDownloadIconButton(sceneNumber, sceneOut),
       h(
         "button",
         {
           class: "btn primary",
           disabled: transition || !sceneTotal,
           title: transition
-            ? "Transitions bake into neighboring scenes — use Process Video"
-            : "Render this scene only",
+            ? "Transitions bake into the full video — use Process Video"
+            : `Render '${sceneName}' only (no map transitions)`,
           onClick: () => generate(sceneNumber),
         },
-        "Process Scene"
+        `Process '${sceneName}'`
       ),
-      transition
-        ? null
-        : h(
-            "button",
-            {
-              class: "btn ghost",
-              type: "button",
-              disabled: !hasOutput(sceneOut),
-              title: hasOutput(sceneOut)
-                ? sceneOut.name || "Download this scene"
-                : "Process Scene first",
-              onClick: () => {
-                if (!hasOutput(sceneOut)) return;
-                downloadOutput(sceneNumber);
-              },
-            },
-            "Download"
-          ),
     ].filter(Boolean);
   }
 
-  return [downloadVideoControl(), generateVideoButton(total, videoOut)];
+  return [videoDebug, downloadVideoControl(), generateVideoButton(total, videoOut)];
 }
 
 function renderGateItems() {
@@ -2904,48 +3417,46 @@ function renderGateItems() {
         : {
             key: `scene-${index}`,
             label: entry.title?.trim() || `Scene ${index + 1}`,
-            ready: hasOutput(sceneOutput(index)),
+            ready: outputReady(sceneOutput(index)),
           }
     )
     .filter(Boolean);
   items.push({
     key: "video",
     label: "Full video",
-    ready: hasOutput(state.outputs?.video),
+    ready: outputReady(state.outputs?.video),
   });
   return items;
 }
 
 function downloadVideoControl() {
-  const ready = hasOutput(state.outputs?.video);
+  const ready = outputReady(state.outputs?.video);
   const items = renderGateItems();
   const pending = items.filter((item) => !item.ready);
-
-  if (ready) {
-    return h(
-      "button",
-      {
-        class: "btn ghost",
-        type: "button",
-        title: state.outputs.video.name || "Download video",
-        onClick: () => downloadOutput(),
+  const downloadBtn = h(
+    "button",
+    {
+      class: "btn ghost icon-btn",
+      type: "button",
+      disabled: !ready,
+      title: ready
+        ? state.outputs?.video?.name || "Download video"
+        : "Process first to download",
+      "aria-label": ready ? "Download video" : "Process first to download",
+      onClick: () => {
+        if (!ready) return;
+        downloadOutput();
       },
-      "Download"
-    );
-  }
+    },
+    downloadIcon()
+  );
+
+  if (ready) return downloadBtn;
 
   return h(
     "div",
     { class: "download-gate" },
-    h(
-      "button",
-      {
-        class: "btn ghost",
-        type: "button",
-        disabled: true,
-        text: "Download",
-      }
-    ),
+    downloadBtn,
     h(
       "div",
       { class: "download-gate-menu", role: "status" },
@@ -2972,7 +3483,7 @@ function downloadVideoControl() {
           text:
             pending.length === 1 && pending[0].key === "video"
               ? "Process Video to unlock download."
-              : "Process each scene, then Process Video.",
+              : "Process Video catches up outdated scenes, then stitches clips and adds transitions.",
         })
     )
   );
@@ -2984,8 +3495,10 @@ function generateVideoButton(total, videoOut) {
     {
       class: "btn primary",
       disabled: !total,
-      title: hasOutput(videoOut) ? videoOut.name || "Re-render full video" : "Render full video",
-      onClick: () => generate(),
+      title: outputReady(videoOut)
+        ? "Catch up outdated scenes if needed, then stitch clips + transitions"
+        : "Process missing/outdated scenes, then stitch clips + transitions",
+      onClick: () => startProcessVideo(),
     },
     "Process Video"
   );
@@ -3060,10 +3573,16 @@ function render() {
   }
   if (state.page !== "video") overlayUi = null;
 
-  if (state.page === "landing") app.replaceChildren(landingView());
-  else if (state.page === "list") app.replaceChildren(listView());
-  else if (state.page === "scene") app.replaceChildren(sceneView());
-  else app.replaceChildren(videoView());
+  const view =
+    state.page === "landing"
+      ? landingView()
+      : state.page === "list"
+        ? listView()
+        : state.page === "scene"
+          ? sceneView()
+          : videoView();
+  const panel = processPanelView();
+  app.replaceChildren(...[view, panel].filter(Boolean));
 
   restoreScroll(savedScroll);
   // Layout can settle after the first paint; restore again so we don't jump to top.
@@ -3619,7 +4138,7 @@ function videoView() {
             const normalIndexes = scenes()
               .map((scene, index) => (!scene.is_transition ? index : -1))
               .filter((index) => index >= 0);
-            const ready = normalIndexes.filter((index) => hasOutput(sceneOutput(index))).length;
+            const ready = normalIndexes.filter((index) => outputReady(sceneOutput(index))).length;
             const parts = [clock(total)];
             if (ready) parts.push(`${ready}/${normalIndexes.length} rendered`);
             return parts.join(" · ");
@@ -4200,7 +4719,7 @@ function sceneCard(index, item) {
         "div",
         { class: "scene-meta-top" },
         h("span", { class: "name", text: item.title }),
-        outputTag(sceneOutput(index))
+        !item.isTransition && outputTag(sceneOutput(index), { showMissing: true })
       ),
       h("span", {
         class: "len",
@@ -4892,8 +5411,7 @@ function sceneView() {
               },
             }),
             h("span", { text: "Is transition" })
-          ),
-          outputTag(sceneOutput(state.sceneIndex))
+          )
         ),
         sceneDetails(),
         filledSceneEdits().length > 0 &&
@@ -7143,6 +7661,8 @@ function addSongControl() {
 }
 
 function renderStatus() {
+  // Queue progress lives in the bottom-right process panel.
+  if (state.processPanel?.open) return null;
   if (state.render.status === "running" && state.render.video === state.videoId) {
     return h(
       "div",

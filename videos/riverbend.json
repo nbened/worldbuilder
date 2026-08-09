@@ -46,10 +46,7 @@
       "pan": "none",
       "zoom": 1,
       "tracks": [
-        "assets/music/Dusk at the Platform.mp3",
-        "assets/music/Dusk at the Platform (3).mp3",
-        "assets/music/Dusk at the Platform (2).mp3",
-        "assets/music/Dusk at the Platform (1).mp3"
+        "assets/music/Station 3.mp3"
       ],
       "effects": [],
       "animations": [
@@ -139,9 +136,7 @@
       "pan": "none",
       "zoom": 1,
       "tracks": [
-        "assets/music/Waterfront Waltz.mp3",
-        "assets/music/Harbor 1.mp3",
-        "assets/music/Harbor 2.mp3"
+        "assets/music/Waterfront Waltz.mp3"
       ],
       "sounds": [],
       "effects": [],
@@ -214,9 +209,7 @@
       "pan": "none",
       "zoom": 1,
       "tracks": [
-        "assets/music/Campfire Minor 2.mp3",
-        "assets/music/Campfire Minor.mp3",
-        "assets/music/The Last Warm Night.mp3"
+        "assets/music/Campfire Minor 2.mp3"
       ],
       "effects": [],
       "animations": [

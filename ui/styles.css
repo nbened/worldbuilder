@@ -65,6 +65,10 @@ button {
   flex: none;
 }
 
+.topbar .ready-tag {
+  margin-right: 2px;
+}
+
 .breadcrumbs {
   display: flex;
   align-items: center;
@@ -169,6 +173,56 @@ button {
 .btn:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+.debug-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.debug-menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(55, 53, 47, 0.12);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+  pointer-events: none;
+}
+
+.debug-menu.is-open .debug-menu-panel {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.debug-menu-item {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.debug-menu-item:hover {
+  background: var(--callout);
 }
 
 .download-gate {
@@ -618,6 +672,16 @@ button {
 .ready-tag.is-ready {
   color: #0f7b6c;
   background: #e7f5f2;
+}
+
+.ready-tag.is-outdated {
+  color: #8a5a00;
+  background: #fff3d6;
+}
+
+.ready-tag.is-missing {
+  color: #a32020;
+  background: #fdecec;
 }
 
 .btn.icon-btn {
@@ -3129,6 +3193,147 @@ button {
   height: 100%;
   background: var(--ink);
   transition: width 300ms linear;
+}
+
+.process-panel {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 80;
+  width: min(320px, calc(100vw - 32px));
+  padding: 14px 14px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 36px rgba(55, 53, 47, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.process-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.process-panel-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.process-panel-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.process-panel-close:hover {
+  color: var(--ink);
+}
+
+.process-panel-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(40vh, 280px);
+  overflow: auto;
+}
+
+.process-panel-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.process-panel-mark {
+  flex: 0 0 16px;
+  width: 16px;
+  text-align: center;
+  font-weight: 650;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.process-panel-item.is-done .process-panel-mark {
+  color: #2f6f4e;
+}
+
+.process-panel-item.is-running .process-panel-mark {
+  color: var(--ink);
+}
+
+.process-panel-item.is-error .process-panel-mark {
+  color: #a32020;
+}
+
+.process-panel-item.is-cancelled .process-panel-mark,
+.process-panel-item.is-bundled .process-panel-mark {
+  color: var(--muted);
+}
+
+.process-panel-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.process-panel-label {
+  color: var(--ink);
+  font-weight: 550;
+}
+
+.process-panel-meta {
+  color: var(--muted);
+}
+
+.process-panel-item.is-running .process-panel-label {
+  font-weight: 650;
+}
+
+.process-panel-item.is-transition .process-panel-label {
+  font-weight: 500;
+}
+
+.process-panel-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.process-panel-bar .fill {
+  height: 100%;
+  background: var(--ink);
+  transition: width 300ms linear;
+}
+
+.process-panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.process-panel-total {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--ink);
+  line-height: 1.3;
 }
 
 .callout {
