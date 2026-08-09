@@ -3257,16 +3257,24 @@ button {
 }
 
 .process-panel-mark {
-  flex: 0 0 16px;
-  width: 16px;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
-  font-weight: 650;
+  font-size: 11px;
+  font-weight: 700;
   color: var(--muted);
-  line-height: 1.35;
+  line-height: 1;
 }
 
 .process-panel-item.is-done .process-panel-mark {
-  color: #2f6f4e;
+  color: #fff;
+  background: #22c55e;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.25);
 }
 
 .process-panel-item.is-running .process-panel-mark {

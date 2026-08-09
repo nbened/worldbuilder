@@ -1261,6 +1261,10 @@ def bridge_map_filter(
         z_end = 1.0 / max(min(zw, zh), 0.05)
         cx = zx + zw / 2.0
         cy = zy + zh / 2.0
+        # Use d=1 + `in` (input frame index), never d=N + `on`.
+        # zoompan's d=N expands *each* input frame into N outputs, which freezes
+        # map animations (and any other pre-composited motion) on the first frame.
+        fr = "in"
 
         if zoom_dir == "inout" and isinstance(zoom_start, dict) and isinstance(zoom, dict):
             # [zoom out from start][hold map][zoom in to end]
@@ -1280,35 +1284,35 @@ def bridge_map_filter(
             # z: start→1 over first span, hold 1, then 1→end over last span
             if n_out and n_in:
                 z_expr = (
-                    f"if(lte(on,{n_out - 1}),"
-                    f"{z_start:.6f}+(1-{z_start:.6f})*on/{out_span},"
-                    f"if(lte(on,{in_start}),1,"
-                    f"1+({z_end:.6f}-1)*(on-{in_start})/{in_span}))"
+                    f"if(lte({fr},{n_out - 1}),"
+                    f"{z_start:.6f}+(1-{z_start:.6f})*{fr}/{out_span},"
+                    f"if(lte({fr},{in_start}),1,"
+                    f"1+({z_end:.6f}-1)*({fr}-{in_start})/{in_span}))"
                 )
             elif n_out:
                 z_expr = (
-                    f"if(lte(on,{out_span}),"
-                    f"{z_start:.6f}+(1-{z_start:.6f})*on/{out_span},1)"
+                    f"if(lte({fr},{out_span}),"
+                    f"{z_start:.6f}+(1-{z_start:.6f})*{fr}/{out_span},1)"
                 )
             else:
                 z_expr = (
-                    f"if(lte(on,{in_start}),1,"
-                    f"1+({z_end:.6f}-1)*(on-{in_start})/{in_span})"
+                    f"if(lte({fr},{in_start}),1,"
+                    f"1+({z_end:.6f}-1)*({fr}-{in_start})/{in_span})"
                 )
             # Pan center: use start center while zooming out, end center while zooming in.
             x_expr = (
-                f"if(lte(on,{max(n_out - 1, 0)}),"
+                f"if(lte({fr},{max(n_out - 1, 0)}),"
                 f"{scx:.6f}*iw-iw/zoom/2,"
                 f"{cx:.6f}*iw-iw/zoom/2)"
             )
             y_expr = (
-                f"if(lte(on,{max(n_out - 1, 0)}),"
+                f"if(lte({fr},{max(n_out - 1, 0)}),"
                 f"{scy:.6f}*ih-ih/zoom/2,"
                 f"{cy:.6f}*ih-ih/zoom/2)"
             )
             parts.append(
                 f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':"
-                f"d={frames}:s={width}x{height}:fps={fps}"
+                f"d=1:s={width}x{height}:fps={fps}"
             )
             parts.append("setsar=1")
         else:
@@ -1327,21 +1331,21 @@ def bridge_map_filter(
                     cx = zx + zw / 2.0
                     cy = zy + zh / 2.0
                 z_expr = (
-                    f"if(lte(on,{anim_span}),"
-                    f"{z_end:.6f}+(1-{z_end:.6f})*on/{anim_span},1)"
+                    f"if(lte({fr},{anim_span}),"
+                    f"{z_end:.6f}+(1-{z_end:.6f})*{fr}/{anim_span},1)"
                 )
             else:
                 # Hold full map, then zoom in over the last zoom_span.
                 start = max(0, frames - n_zoom)
                 z_expr = (
-                    f"if(lte(on,{start}),1,"
-                    f"1+({z_end:.6f}-1)*(on-{start})/{anim_span})"
+                    f"if(lte({fr},{start}),1,"
+                    f"1+({z_end:.6f}-1)*({fr}-{start})/{anim_span})"
                 )
             parts.append(
                 f"zoompan=z='{z_expr}':"
                 f"x='{cx:.6f}*iw-iw/zoom/2':"
                 f"y='{cy:.6f}*ih-ih/zoom/2':"
-                f"d={frames}:s={width}x{height}:fps={fps}"
+                f"d=1:s={width}x{height}:fps={fps}"
             )
             parts.append("setsar=1")
     else:
@@ -1507,12 +1511,13 @@ def build_command(
                     start=anim.get("loop_in"),
                     end=anim.get("loop_out"),
                 )
-                bridge_anim_by_event[event_i].append((bridge_anim_base + bridge_anim_count, anim))
-                bridge_anim_count += 1
-                cmd += [
-                    "-stream_loop", "-1",
-                    "-i", str(looped),
-                ]
+            bridge_anim_by_event[event_i].append((bridge_anim_base + bridge_anim_count, anim))
+            bridge_anim_count += 1
+            cmd += [
+                "-stream_loop", "-1",
+                "-t", f"{hold:.3f}",
+                "-i", str(looped),
+            ]
         overlay_base = bridge_anim_base + bridge_anim_count
         for event in collect_overlay_events(scenes, overlays):
             png = overlay_png_for(event, height)
@@ -1734,9 +1739,11 @@ def build_command(
             )
             ov = f"map{step}"
             out = f"vm{step}"
+            end = start + duration
             if not anims:
                 graph.append(
-                    f"[{input_index}:v]{zoom_chain},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
+                    f"[{input_index}:v]{zoom_chain},"
+                    f"trim=duration={duration:.3f},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
                 )
             else:
                 mw, mh = image_size(Path(event["image"]))
@@ -1811,10 +1818,14 @@ def build_command(
                     )
                     layer = nxt
                 graph.append(
-                    f"[{layer}]{zoom_chain},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
+                    f"[{layer}]{zoom_chain},"
+                    f"trim=duration={duration:.3f},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
                 )
+            # repeatlast defaults to 1 and freezes the last map frame over the rest
+            # of the timeline — eof_action=pass alone is not enough on recent ffmpeg.
             graph.append(
-                f"[{current}][{ov}]overlay=0:0:eof_action=pass:format=auto[{out}]"
+                f"[{current}][{ov}]overlay=0:0:eof_action=pass:repeatlast=0:format=auto:"
+                f"enable='gte(t\\,{start:.3f})*lt(t\\,{end:.3f})'[{out}]"
             )
             current = out
 
@@ -1837,7 +1848,7 @@ def build_command(
             graph.append(
                 f"[{current}][{ov}]overlay="
                 f"x='min({ax}\\,main_w-overlay_w)':y='min({ay}\\,main_h-overlay_h)':"
-                f"eof_action=pass:format=auto[{out}]"
+                f"eof_action=pass:repeatlast=0:format=auto[{out}]"
             )
             current = out
         graph.append(f"[{current}]format=yuv420p,trim=duration={total:.3f},setpts=PTS-STARTPTS[v]")
@@ -2005,7 +2016,7 @@ def build_assemble_command(
             )
             bridge_anim_by_event[event_i].append((bridge_anim_base + bridge_anim_count, anim))
             bridge_anim_count += 1
-            cmd += ["-stream_loop", "-1", "-i", str(looped)]
+            cmd += ["-stream_loop", "-1", "-t", f"{hold:.3f}", "-i", str(looped)]
 
     overlay_base = bridge_anim_base + bridge_anim_count
     overlay_inputs: list[tuple[dict, Path]] = []
@@ -2091,9 +2102,11 @@ def build_assemble_command(
         )
         ov = f"map{step}"
         out = f"vm{step}"
+        end = start + duration
         if not anims:
             graph.append(
-                f"[{input_index}:v]{zoom_chain},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
+                f"[{input_index}:v]{zoom_chain},"
+                f"trim=duration={duration:.3f},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
             )
         else:
             mw, mh = image_size(Path(event["image"]))
@@ -2161,10 +2174,12 @@ def build_assemble_command(
                 )
                 layer = nxt
             graph.append(
-                f"[{layer}]{zoom_chain},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
+                f"[{layer}]{zoom_chain},"
+                f"trim=duration={duration:.3f},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
             )
         graph.append(
-            f"[{current}][{ov}]overlay=0:0:eof_action=pass:format=auto[{out}]"
+            f"[{current}][{ov}]overlay=0:0:eof_action=pass:repeatlast=0:format=auto:"
+            f"enable='gte(t\\,{start:.3f})*lt(t\\,{end:.3f})'[{out}]"
         )
         current = out
 
@@ -2178,16 +2193,18 @@ def build_assemble_command(
         ay = int(round(height * max(0.0, min(event["y"], 1.0))))
         ov = f"ov{step}"
         out = f"vo{step}"
+        end = start + duration
         graph.append(
             f"[{input_index}:v]fps={fps},format=rgba,"
             f"fade=t=in:st=0:d={ov_fade:.3f}:alpha=1,"
             f"fade=t=out:st={out_start:.3f}:d={ov_fade:.3f}:alpha=1,"
-            f"setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
+            f"trim=duration={duration:.3f},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
         )
         graph.append(
             f"[{current}][{ov}]overlay="
             f"x='min({ax}\\,main_w-overlay_w)':y='min({ay}\\,main_h-overlay_h)':"
-            f"eof_action=pass:format=auto[{out}]"
+            f"eof_action=pass:repeatlast=0:format=auto:"
+            f"enable='gte(t\\,{start:.3f})*lt(t\\,{end:.3f})'[{out}]"
         )
         current = out
 
@@ -2363,17 +2380,27 @@ def main() -> int:
 
     assemble_clips: list[Path] = []
     if args.assemble:
-        # Final output path is `out/foo.mp4`; clips live beside it as foo-sceneN.mp4.
-        base = output
+        # Scene clips always live next to the script's normal output file
+        # (out/foo-sceneN.mp4), even when --preview / --output rename the assemble target.
+        clip_base = root / output_config.get("file", "out/journey.mp4")
         playable = [
             scene for scene in scenes if not scene.is_transition and scene.audio_duration > 0.001
         ]
         for scene in playable:
-            clip = base.with_name(f"{base.stem}-scene{scene.index}{base.suffix}")
+            clip = clip_base.with_name(f"{clip_base.stem}-scene{scene.index}{clip_base.suffix}")
             if not clip.exists():
                 print(
                     f"error: missing scene clip for {scene.title!r} ({clip.name}) — "
                     "Process Scene first",
+                    file=sys.stderr,
+                )
+                return 1
+            actual = probe_duration(clip)
+            if actual + 0.5 < scene.audio_duration:
+                print(
+                    f"error: scene clip for {scene.title!r} is incomplete "
+                    f"({actual:.1f}s on disk, needs {scene.audio_duration:.1f}s) — "
+                    "Process Scene again",
                     file=sys.stderr,
                 )
                 return 1

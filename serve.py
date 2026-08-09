@@ -173,7 +173,8 @@ def output_status(
     incomplete = False
     if expected_duration is not None and expected_duration > 2:
         actual = probe_duration(path)
-        if actual is None or actual < max(2.0, expected_duration * 0.5):
+        # Allow ~0.5s mux slack; anything shorter is a truncated render.
+        if actual is None or actual + 0.5 < expected_duration:
             incomplete = True
     stale = False
     if fingerprint is not None:
