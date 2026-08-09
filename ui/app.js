@@ -44,6 +44,8 @@ let overlayUi = null;
 let renderEtaSamples = [];
 const OVERLAY_FADE = 0.6;
 const DEFAULT_MAP_SECONDS = 30;
+const DEFAULT_ZOOM_SECONDS = 3;
+const DEFAULT_FADE_SECONDS = 3;
 
 /* ---------- helpers ---------- */
 
@@ -254,13 +256,16 @@ function ensureScript() {
   if (!state.script) return;
   state.script.scenes ||= [];
   state.script.defaults ||= {
-    fade_seconds: 3,
+    fade_seconds: DEFAULT_FADE_SECONDS,
     track_crossfade: 2,
     open_close_fade: 2,
     map_seconds: DEFAULT_MAP_SECONDS,
   };
   if (state.script.defaults.map_seconds == null) {
     state.script.defaults.map_seconds = DEFAULT_MAP_SECONDS;
+  }
+  if (state.script.defaults.fade_seconds == null) {
+    state.script.defaults.fade_seconds = DEFAULT_FADE_SECONDS;
   }
   ensureOverlays();
   ensureCreativeBrief();
@@ -358,6 +363,7 @@ function blankScene() {
     is_transition: false,
     transition_in: "fade",
     transition_out: "fade",
+    fade_zoom: null,
     image_prompt: "",
     music_prompt: "",
   };
@@ -372,10 +378,149 @@ function blankTransition() {
   entry.map = { seconds: DEFAULT_MAP_SECONDS };
   entry.transition_in = "fade";
   entry.transition_out = "fade";
+  entry.fade_zoom = {
+    seconds: DEFAULT_ZOOM_SECONDS,
+    include_start: true,
+    include_end: true,
+    start: { x: 0.15, y: 0.2, w: 0.35, h: 0.4 },
+    end: { x: 0.5, y: 0.25, w: 0.35, h: 0.4 },
+  };
   return entry;
 }
 
-const TRANSITION_FX = [{ id: "fade", label: "Fade" }];
+const TRANSITION_FX = [
+  { id: "fade", label: "Fade" },
+  { id: "fade_zoom", label: "Fade zoom" },
+];
+
+function clampZoomRect(rect, fallback) {
+  const clamp01 = (value, fb) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : fb;
+  };
+  const src = rect && typeof rect === "object" ? rect : {};
+  const fb = fallback || { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
+  const out = {
+    x: clamp01(src.x, fb.x),
+    y: clamp01(src.y, fb.y),
+    w: clamp01(src.w, fb.w),
+    h: clamp01(src.h, fb.h),
+  };
+  out.w = Math.min(1 - out.x, Math.max(0.05, out.w));
+  out.h = Math.min(1 - out.y, Math.max(0.05, out.h));
+  return out;
+}
+
+function ensureFadeZoom(entry) {
+  if (!entry.fade_zoom || typeof entry.fade_zoom !== "object") {
+    entry.fade_zoom = {};
+  }
+  const z = entry.fade_zoom;
+
+  // Migrate legacy flat {x,y,w,h} into start/end rectangles.
+  if (!z.start || typeof z.start !== "object") {
+    if (Number.isFinite(Number(z.x)) || Number.isFinite(Number(z.w))) {
+      z.start = clampZoomRect(z, { x: 0.15, y: 0.2, w: 0.35, h: 0.4 });
+    } else {
+      z.start = { x: 0.15, y: 0.2, w: 0.35, h: 0.4 };
+    }
+  }
+  if (!z.end || typeof z.end !== "object") {
+    z.end = clampZoomRect(z.start, { x: 0.5, y: 0.25, w: 0.35, h: 0.4 });
+    if (Math.abs(z.end.x - z.start.x) < 0.02 && Math.abs(z.end.y - z.start.y) < 0.02) {
+      z.end = clampZoomRect(
+        { x: Math.min(0.55, z.start.x + 0.3), y: z.start.y, w: z.start.w, h: z.start.h },
+        z.start
+      );
+    }
+  }
+  z.start = clampZoomRect(z.start, { x: 0.15, y: 0.2, w: 0.35, h: 0.4 });
+  z.end = clampZoomRect(z.end, { x: 0.5, y: 0.25, w: 0.35, h: 0.4 });
+  delete z.x;
+  delete z.y;
+  delete z.w;
+  delete z.h;
+
+  if (z.include_start === undefined) z.include_start = true;
+  if (z.include_end === undefined) {
+    // Legacy "no reverse exit" → no end zoom target.
+    z.include_end = entry.fade_zoom_reverse_out !== false;
+  }
+  z.include_start = !!z.include_start;
+  z.include_end = !!z.include_end;
+  delete entry.fade_zoom_reverse_out;
+
+  const zoomSecs = Number(z.seconds);
+  z.seconds = Number.isFinite(zoomSecs) && zoomSecs >= 0 ? zoomSecs : DEFAULT_ZOOM_SECONDS;
+  return z;
+}
+
+function transitionStyleOf(entry) {
+  const style = entry?.transition_in || entry?.transition_out || "fade";
+  return TRANSITION_FX.some((fx) => fx.id === style) ? style : "fade";
+}
+
+function transitionMapSeconds(entry) {
+  const n = Number(entry?.map?.seconds);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+/** Alpha fade at the map overlay edges (per transition, falls back to defaults). */
+function transitionFadeSeconds(entry) {
+  const own = Number(entry?.fade_seconds);
+  if (Number.isFinite(own) && own >= 0) return own;
+  const fallback = Number(state.script?.defaults?.fade_seconds);
+  return Number.isFinite(fallback) && fallback >= 0 ? fallback : DEFAULT_FADE_SECONDS;
+}
+
+function transitionZoomSeconds(entry) {
+  if (!entry || transitionStyleOf(entry) !== "fade_zoom") return 0;
+  const z = ensureFadeZoom(entry);
+  if (!z.include_start && !z.include_end) return 0;
+  const n = Number(z.seconds);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_ZOOM_SECONDS;
+}
+
+/** Map hold + optional start/end zoom spans across the neighboring scenes. */
+function transitionTiming(entry) {
+  const map = transitionMapSeconds(entry);
+  const mapHalf = map / 2;
+  let zoom = 0;
+  let hasStart = false;
+  let hasEnd = false;
+  if (entry && transitionStyleOf(entry) === "fade_zoom") {
+    const z = ensureFadeZoom(entry);
+    hasStart = !!z.include_start;
+    hasEnd = !!z.include_end;
+    zoom = transitionZoomSeconds(entry);
+  }
+  let startZoom = 0;
+  let endZoom = 0;
+  if (hasStart && hasEnd) {
+    startZoom = zoom / 2;
+    endZoom = zoom / 2;
+  } else if (hasStart) startZoom = zoom;
+  else if (hasEnd) endZoom = zoom;
+
+  const outHold = mapHalf + startZoom;
+  const inHold = mapHalf + endZoom;
+  const total = outHold + inHold;
+  return {
+    map,
+    zoom,
+    hasStart,
+    hasEnd,
+    startZoom,
+    endZoom,
+    mapHalf,
+    outHold,
+    inHold,
+    total,
+    // Back-compat aliases used by a few call sites.
+    side: total / 2,
+    zoomHalf: zoom / 2,
+  };
+}
 
 function transitionFxSelect(value, onPick, label) {
   return h(
@@ -392,6 +537,219 @@ function transitionFxSelect(value, onPick, label) {
       TRANSITION_FX.map((fx) => h("option", { value: fx.id, text: fx.label }))
     )
   );
+}
+
+function fadeZoomFields(entry) {
+  const z = ensureFadeZoom(entry);
+  const toggle = (key, label, hint) =>
+    h(
+      "label",
+      { class: `fade-zoom-include${z[key] ? " on" : ""}` },
+      h("input", {
+        type: "checkbox",
+        checked: !!z[key],
+        onChange: (event) => {
+          ensureFadeZoom(entry)[key] = !!event.target.checked;
+          changed();
+        },
+      }),
+      h("span", { text: label }),
+      hint && h("span", { class: "meta", text: hint })
+    );
+
+  return h(
+    "div",
+    { class: "fade-zoom-panel" },
+    h("p", {
+      class: "meta transition-note",
+      text: "Optional zoom targets on the full map. With only End: map holds full, then zooms in. With only Start: opens zoomed in and pulls out to the map.",
+    }),
+    h(
+      "div",
+      { class: "fade-zoom-includes" },
+      toggle("include_start", "Include start", "zoom out from Start"),
+      toggle("include_end", "Include end", "zoom in to End")
+    )
+  );
+}
+
+function fadeZoomGuide(which) {
+  const z = ensureFadeZoom(scene());
+  if (which === "start" && !z.include_start) return null;
+  if (which === "end" && !z.include_end) return null;
+  const rect = z[which];
+  const label = which === "start" ? "Start" : "End";
+  return h(
+    "div",
+    {
+      class: `fade-zoom-guide is-${which}`,
+      style: {
+        left: `${rect.x * 100}%`,
+        top: `${rect.y * 100}%`,
+        width: `${rect.w * 100}%`,
+        height: `${rect.h * 100}%`,
+      },
+      title: `${label} zoom target — drag to move, corner to resize`,
+      "data-zoom-which": which,
+      onPointerdown: (event) => beginFadeZoomMove(event, which),
+    },
+    h("span", { class: "fade-zoom-label", text: label }),
+    h("div", {
+      class: "fade-zoom-handle",
+      title: "Resize",
+      onPointerdown: (event) => beginFadeZoomResize(event, which),
+    })
+  );
+}
+
+function transitionDurationFields(entry) {
+  const timing = transitionTiming(entry);
+  const fadeSecs = transitionFadeSeconds(entry);
+  const zoomStyle = transitionStyleOf(entry) === "fade_zoom";
+  const showZoom = zoomStyle && (timing.hasStart || timing.hasEnd);
+  return h(
+    "div",
+    { class: "transition-duration-fields" },
+    h(
+      "label",
+      { class: "transition-map-hold" },
+      h("span", { text: "Map (seconds)" }),
+      h("input", {
+        type: "number",
+        min: "0",
+        step: "1",
+        value: String(timing.map),
+        title: "How long the map holds (still) across the cut",
+        onChange: (event) => {
+          const next = Math.max(0, Number(event.target.value) || 0);
+          if (!entry.map || typeof entry.map !== "object") entry.map = {};
+          entry.map.seconds = next;
+          changed();
+        },
+      })
+    ),
+    h(
+      "label",
+      { class: "transition-map-hold" },
+      h("span", { text: "Fade (seconds)" }),
+      h("input", {
+        type: "number",
+        min: "0",
+        step: "0.25",
+        value: String(fadeSecs),
+        title: "How long the map fades in at the start and out at the end",
+        onChange: (event) => {
+          entry.fade_seconds = Math.max(0, Number(event.target.value) || 0);
+          changed();
+        },
+      })
+    ),
+    showZoom &&
+      h(
+        "label",
+        { class: "transition-map-hold" },
+        h("span", { text: "Zoom (seconds)" }),
+        h("input", {
+          type: "number",
+          min: "0",
+          step: "0.5",
+          value: String(Number(ensureFadeZoom(entry).seconds)),
+          title: timing.hasStart && timing.hasEnd
+            ? "Split across start zoom-out and end zoom-in"
+            : timing.hasStart
+              ? "Duration of the start zoom-out"
+              : "Duration of the end zoom-in",
+          onChange: (event) => {
+            const next = Math.max(0, Number(event.target.value) || 0);
+            ensureFadeZoom(entry).seconds = next;
+            changed();
+          },
+        })
+      ),
+    h("span", {
+      class: "meta transition-duration-total",
+      text:
+        timing.total > 0
+          ? `Total ${clock(timing.total)} · ${clock(timing.outHold)} before · ${clock(timing.inHold)} after`
+          : "No overlay",
+    })
+  );
+}
+
+function beginFadeZoomMove(event, which = "start") {
+  if (event.target.closest(".fade-zoom-handle")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const picture = event.currentTarget.closest(".picture");
+  const guide = event.currentTarget;
+  if (!picture || !isTransitionScene()) return;
+  const entry = scene();
+  const z = ensureFadeZoom(entry);
+  const rect = z[which] || z.start;
+  const box = picture.getBoundingClientRect();
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const originX = rect.x;
+  const originY = rect.y;
+
+  guide.classList.add("dragging");
+  guide.setPointerCapture(event.pointerId);
+  const move = (moveEvent) => {
+    rect.x = Math.min(1 - rect.w, Math.max(0, originX + (moveEvent.clientX - startX) / box.width));
+    rect.y = Math.min(1 - rect.h, Math.max(0, originY + (moveEvent.clientY - startY) / box.height));
+    guide.style.left = `${rect.x * 100}%`;
+    guide.style.top = `${rect.y * 100}%`;
+  };
+  const up = () => {
+    guide.classList.remove("dragging");
+    guide.releasePointerCapture(event.pointerId);
+    guide.removeEventListener("pointermove", move);
+    guide.removeEventListener("pointerup", up);
+    guide.removeEventListener("pointercancel", up);
+    ensureFadeZoom(entry);
+    changed();
+  };
+  guide.addEventListener("pointermove", move);
+  guide.addEventListener("pointerup", up);
+  guide.addEventListener("pointercancel", up);
+}
+
+function beginFadeZoomResize(event, which = "start") {
+  event.preventDefault();
+  event.stopPropagation();
+  const handle = event.currentTarget;
+  const guide = handle.closest(".fade-zoom-guide");
+  const picture = guide?.closest(".picture");
+  if (!picture || !isTransitionScene()) return;
+  const entry = scene();
+  const z = ensureFadeZoom(entry);
+  const rect = z[which] || z.start;
+  const box = picture.getBoundingClientRect();
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const originW = rect.w;
+  const originH = rect.h;
+
+  guide.classList.add("dragging");
+  handle.setPointerCapture(event.pointerId);
+  const move = (moveEvent) => {
+    rect.w = Math.min(1 - rect.x, Math.max(0.05, originW + (moveEvent.clientX - startX) / box.width));
+    rect.h = Math.min(1 - rect.y, Math.max(0.05, originH + (moveEvent.clientY - startY) / box.height));
+    guide.style.width = `${rect.w * 100}%`;
+    guide.style.height = `${rect.h * 100}%`;
+  };
+  const up = () => {
+    guide.classList.remove("dragging");
+    handle.releasePointerCapture(event.pointerId);
+    handle.removeEventListener("pointermove", move);
+    handle.removeEventListener("pointerup", up);
+    handle.removeEventListener("pointercancel", up);
+    ensureFadeZoom(entry);
+    changed();
+  };
+  handle.addEventListener("pointermove", move);
+  handle.addEventListener("pointerup", up);
+  handle.addEventListener("pointercancel", up);
 }
 
 function isTransitionScene(entry = scene()) {
@@ -805,34 +1163,92 @@ function scene(index = state.sceneIndex) {
 
 const sceneSongs = (index = state.sceneIndex) => (scene(index).tracks ||= []);
 
-/** Map path + opacity for a transition overlay sitting on top of a normal scene. */
+/** CSS transform for fade-zoom: progress 0 = full map, 1 = zoomed into the rect. */
+function applyFadeZoomStyle(el, rect, progress) {
+  if (!el) return;
+  if (!rect || !(rect.w > 0) || !(rect.h > 0)) {
+    el.style.transform = "";
+    el.style.transformOrigin = "";
+    return;
+  }
+  const zEnd = 1 / Math.max(Math.min(rect.w, rect.h), 0.05);
+  const t = Math.min(1, Math.max(0, progress));
+  const scale = 1 + (zEnd - 1) * t;
+  el.style.transformOrigin = `${(rect.x + rect.w / 2) * 100}% ${(rect.y + rect.h / 2) * 100}%`;
+  el.style.transform = `scale(${scale})`;
+}
+
+/** Map path + opacity (+ zoom) for a transition overlay sitting on a normal scene. */
 function transitionOverlayAt(at = player.at) {
   const list = scenes();
   const item = activeVideoItem(at);
   if (!item || item.isTransition || !(item.duration > 0)) return null;
   const local = Math.max(0, at - item.start);
-  const fade = Math.max(0.25, Number(state.script.defaults?.fade_seconds ?? 3));
   const mapOf = (entry) => entry?.image || state.script?.map || "";
 
   const after = list[item.index + 1];
   if (after?.is_transition) {
-    const hold = Math.max(0, Number(after.map?.seconds || 0) / 2);
+    const timing = transitionTiming(after);
+    const hold = timing.outHold;
     if (hold > 0.05 && local >= item.duration - hold - 0.001) {
       const into = local - (item.duration - hold);
-      const opacity = Math.min(1, Math.max(0, into / fade));
+      const fade = Math.max(0, transitionFadeSeconds(after));
+      const fadeSpan = Math.min(fade || 0.001, hold);
+      const opacity = Math.min(1, Math.max(0, into / fadeSpan));
       const path = mapOf(after);
-      if (path) return { path, opacity, title: after.title || "Transition" };
+      // Opening: optional zoom out from Start, otherwise stay on full map.
+      let zoomProgress = 0;
+      let zoomRect = null;
+      if (timing.hasStart) {
+        const fz = ensureFadeZoom(after);
+        zoomRect = fz.start;
+        zoomProgress =
+          timing.startZoom > 0.001 ? 1 - Math.min(1, into / timing.startZoom) : 0;
+      }
+      if (path) {
+        return {
+          path,
+          opacity,
+          title: after.title || "Transition",
+          entry: after,
+          zoomProgress,
+          zoomRect,
+        };
+      }
     }
   }
 
   const before = list[item.index - 1];
   if (before?.is_transition) {
-    const hold = Math.max(0, Number(before.map?.seconds || 0) / 2);
+    const timing = transitionTiming(before);
+    const hold = timing.inHold;
     if (hold > 0.05 && local <= hold + 0.001) {
       const remaining = hold - local;
-      const opacity = remaining >= fade ? 1 : Math.min(1, Math.max(0, remaining / fade));
+      const fade = Math.max(0, transitionFadeSeconds(before));
+      const fadeSpan = Math.min(fade || 0.001, hold);
+      const opacity = remaining >= fadeSpan ? 1 : Math.min(1, Math.max(0, remaining / fadeSpan));
       const path = mapOf(before);
-      if (path) return { path, opacity, title: before.title || "Transition" };
+      let zoomProgress = 0;
+      let zoomRect = null;
+      if (timing.hasEnd) {
+        const fz = ensureFadeZoom(before);
+        zoomRect = fz.end;
+        // Closing: hold full map, then zoom in to End.
+        zoomProgress =
+          timing.endZoom > 0.001
+            ? Math.min(1, Math.max(0, (local - timing.mapHalf) / timing.endZoom))
+            : 0;
+      }
+      if (path) {
+        return {
+          path,
+          opacity,
+          title: before.title || "Transition",
+          entry: before,
+          zoomProgress,
+          zoomRect,
+        };
+      }
     }
   }
 
@@ -840,6 +1256,7 @@ function transitionOverlayAt(at = player.at) {
 }
 
 function sceneSequence(index) {
+  // Transitions add no runtime to the video timeline — they overlay neighbors.
   if (isTransitionScene(scene(index))) return { list: [], total: 0 };
 
   const crossfade = Number(state.script.defaults?.track_crossfade ?? 2);
@@ -858,12 +1275,19 @@ function sceneSequence(index) {
   return { list, total: Math.max(0, total) };
 }
 
+/** Playable length on the scene page (map + zoom for transitions). */
+function scenePlayTotal(index = state.sceneIndex) {
+  const entry = scene(index);
+  if (entry?.is_transition) return transitionTiming(entry).total;
+  return sceneSequence(index).total;
+}
+
 function videoTimeline() {
   let start = 0;
   const items = scenes().map((entry, index) => {
     const { list, total } = sceneSequence(index);
     const mapOnly =
-      !!entry.is_transition && Number(entry.map?.seconds || 0) > 0 && !entry.image;
+      !!entry.is_transition && transitionTiming(entry).total > 0 && !entry.image;
     const item = {
       index,
       title: entry.title || `Scene ${index + 1}`,
@@ -882,18 +1306,20 @@ function videoTimeline() {
 
 /** Flat song list with absolute start times across the whole video. */
 function videoSongs() {
-  const { items } = videoTimeline();
-  const list = [];
-  items.forEach((item) => {
-    item.songs.forEach((song) => {
-      list.push({ ...song, start: item.start + song.start });
+  const tl = cachedVideoTimeline();
+  if (!tl._songs) {
+    tl._songs = [];
+    tl.items.forEach((item) => {
+      item.songs.forEach((song) => {
+        tl._songs.push({ ...song, start: item.start + song.start });
+      });
     });
-  });
-  return list;
+  }
+  return tl._songs;
 }
 
 function activeVideoItem(at = player.at) {
-  const { items } = videoTimeline();
+  const { items } = cachedVideoTimeline();
   let active = items[0] || null;
   items.forEach((item) => {
     if (at >= item.start - 0.001) active = item;
@@ -903,9 +1329,13 @@ function activeVideoItem(at = player.at) {
 
 function playScope() {
   if (state.page === "scene") {
-    return { mode: "scene", scene: state.sceneIndex, total: sceneSequence(state.sceneIndex).total };
+    return { mode: "scene", scene: state.sceneIndex, total: scenePlayTotal(state.sceneIndex) };
   }
-  return { mode: "video", scene: null, total: videoTimeline().total };
+  return { mode: "video", scene: null, total: cachedVideoTimeline().total };
+}
+
+function isTransitionPreview() {
+  return state.page === "scene" && isTransitionScene();
 }
 
 function audioKey() {
@@ -920,8 +1350,11 @@ function audioKey() {
   const sceneSig = (index) => {
     const entry = scenes()[index];
     if (entry?.is_transition) {
-      const hold = Number(entry.map?.seconds || 0);
-      return `t:${entry.image || ""}:${hold}:${entry.transition_in || "fade"}:${entry.transition_out || "fade"}`;
+      const timing = transitionTiming(entry);
+      const z = ensureFadeZoom(entry);
+      const s = z.include_start ? z.start || {} : {};
+      const e = z.include_end ? z.end || {} : {};
+      return `t:${entry.image || ""}:${timing.map}:${timing.zoom}:${transitionFadeSeconds(entry)}:${z.include_start ? 1 : 0}:${z.include_end ? 1 : 0}:${entry.transition_in || "fade"}:${s.x},${s.y},${s.w},${s.h}:${e.x},${e.y},${e.w},${e.h}`;
     }
     return (entry?.tracks || []).map(fileOf).join(",");
   };
@@ -953,23 +1386,145 @@ const audio = new Audio();
 audio.preload = "none";
 const player = { key: null, at: 0, playing: false, loading: false, total: 0 };
 let scrubber = null;
+let previewRaf = null; // silent transition-scene clock
+let overlayRaf = null; // video-page playhead synced to audio each frame
+let timelineCache = null;
+
+function invalidateTimelineCache() {
+  timelineCache = null;
+}
+
+function cachedVideoTimeline() {
+  if (!timelineCache) timelineCache = videoTimeline();
+  return timelineCache;
+}
+
+function stopPreviewClock() {
+  if (previewRaf == null) return;
+  cancelAnimationFrame(previewRaf);
+  previewRaf = null;
+}
+
+function stopOverlayClock() {
+  if (overlayRaf == null) return;
+  cancelAnimationFrame(overlayRaf);
+  overlayRaf = null;
+}
+
+function startPreviewClock() {
+  stopPreviewClock();
+  stopOverlayClock();
+  const scope = playScope();
+  const total = player.total || scope.total;
+  if (!(total > 0)) return;
+  const origin = performance.now() - player.at * 1000;
+  const tick = (now) => {
+    if (!player.playing) return;
+    player.at = Math.min(total, (now - origin) / 1000);
+    paintPlayhead();
+    if (player.at >= total - 0.001) {
+      player.playing = false;
+      player.at = 0;
+      stopPreviewClock();
+      syncPlayButton();
+      paintPlayhead();
+      return;
+    }
+    previewRaf = requestAnimationFrame(tick);
+  };
+  previewRaf = requestAnimationFrame(tick);
+}
+
+/** Smooth video-page overlays (zoom/map) — audio timeupdate is only ~4Hz and looks choppy. */
+function startOverlayClock() {
+  stopOverlayClock();
+  const tick = () => {
+    if (!player.playing || isTransitionPreview()) {
+      overlayRaf = null;
+      return;
+    }
+    if (audio.getAttribute("src") && Number.isFinite(audio.currentTime)) {
+      player.at = audio.currentTime;
+      paintPlayhead();
+    }
+    overlayRaf = requestAnimationFrame(tick);
+  };
+  overlayRaf = requestAnimationFrame(tick);
+}
+
+/** Edit on the full map; only animate zoom while play is running. */
+function syncSceneTransitionPreview() {
+  if (!isTransitionPreview()) return;
+  const still = document.querySelector(".stage .picture-still");
+  const guides = document.querySelectorAll(".stage .fade-zoom-guide");
+  if (!still) return;
+
+  // Default / paused: full map so included Start/End targets can be placed.
+  if (!player.playing) {
+    applyFadeZoomStyle(still, null, 0);
+    guides.forEach((guide) => guide.classList.remove("is-preview-hidden"));
+    return;
+  }
+
+  const entry = scene();
+  const timing = transitionTiming(entry);
+  const hold = Math.max(0.001, timing.total);
+  const at = Math.min(hold, Math.max(0, player.at));
+  let zoomProgress = 0;
+  let zoomRect = null;
+  const fz = transitionStyleOf(entry) === "fade_zoom" ? ensureFadeZoom(entry) : null;
+  if (at <= timing.outHold) {
+    if (timing.hasStart && fz) {
+      zoomRect = fz.start;
+      zoomProgress =
+        timing.startZoom > 0.001 ? 1 - Math.min(1, at / timing.startZoom) : 0;
+    }
+  } else if (timing.hasEnd && fz) {
+    const local = at - timing.outHold;
+    zoomRect = fz.end;
+    zoomProgress =
+      timing.endZoom > 0.001
+        ? Math.min(1, Math.max(0, (local - timing.mapHalf) / timing.endZoom))
+        : 0;
+  }
+  applyFadeZoomStyle(still, zoomRect, zoomProgress);
+  guides.forEach((guide) => guide.classList.add("is-preview-hidden"));
+}
 
 function syncSource() {
   if (state.page === "list") return;
   const { key } = audioUrl();
   if (player.key === key) return;
+  stopPreviewClock();
+  stopOverlayClock();
   player.key = key;
   player.at = 0;
   player.playing = false;
   audio.pause();
   audio.removeAttribute("src");
   audio.load();
+  if (isTransitionPreview()) player.total = playScope().total;
+}
+
+function syncPlayButton() {
+  const btn = document.querySelector(".player .play");
+  if (!btn) return;
+  btn.title = player.playing ? "Pause" : "Play";
+  btn.textContent = player.loading ? "\u2026" : player.playing ? "\u23f8" : "\u25b6";
 }
 
 async function togglePlay() {
   const scope = playScope();
   if (!scope.total) return;
   if (player.playing) {
+    if (isTransitionPreview()) {
+      stopPreviewClock();
+      player.playing = false;
+      player.at = 0;
+      syncPlayButton();
+      paintPlayhead();
+      return;
+    }
     audio.pause();
     return;
   }
@@ -977,12 +1532,26 @@ async function togglePlay() {
   clearTimeout(saveTimer);
   await save();
 
+  // Transitions have no playlist — clock the map hold so animations/zoom can be tested.
+  if (isTransitionPreview()) {
+    player.key = audioKey();
+    player.total = scope.total;
+    player.loading = false;
+    // Always begin from the Start zoom (full-map edit view → play zooms in).
+    player.at = 0;
+    player.playing = true;
+    syncPlayButton();
+    syncSceneTransitionPreview();
+    startPreviewClock();
+    return;
+  }
+
   const { key, url } = audioUrl();
   if (player.key !== key || audio.getAttribute("src") !== url) {
     player.key = key;
     player.at = 0;
     player.loading = true;
-    render();
+    syncPlayButton();
     audio.src = url;
   }
   try {
@@ -999,6 +1568,11 @@ function seekTo(seconds) {
   const total = player.total || scope.total;
   const at = Math.min(Math.max(seconds, 0), total || 0);
   player.at = at;
+  if (isTransitionPreview()) {
+    if (player.playing) startPreviewClock();
+    else paintPlayhead();
+    return;
+  }
   if (audio.getAttribute("src") && audio.readyState > 0) audio.currentTime = at;
   paintPlayhead();
 }
@@ -1006,22 +1580,28 @@ function seekTo(seconds) {
 audio.addEventListener("playing", () => {
   player.playing = true;
   player.loading = false;
-  render();
+  syncPlayButton();
+  if (!isTransitionPreview()) startOverlayClock();
 });
 audio.addEventListener("pause", () => {
   player.playing = false;
-  render();
+  stopOverlayClock();
+  syncPlayButton();
 });
 audio.addEventListener("ended", () => {
   player.playing = false;
   player.at = 0;
-  render();
+  stopOverlayClock();
+  syncPlayButton();
+  paintPlayhead();
 });
 audio.addEventListener("loadedmetadata", () => {
   if (Number.isFinite(audio.duration)) player.total = audio.duration;
   if (player.at) audio.currentTime = player.at;
 });
 audio.addEventListener("timeupdate", () => {
+  // While the overlay clock is running, rAF owns the playhead (smoother zoom).
+  if (overlayRaf != null) return;
   player.at = audio.currentTime;
   paintPlayhead();
 });
@@ -1051,6 +1631,7 @@ function paintPlayhead() {
     }
   }
   paintOverlays();
+  syncSceneTransitionPreview();
 }
 
 function windowOpacity(start, showSeconds, at) {
@@ -1113,6 +1694,11 @@ function paintOverlays() {
     }
     overlayUi.map.style.opacity = String(opacity);
     overlayUi.map.classList.toggle("is-hidden", opacity <= 0.01);
+    if (overlay?.zoomRect && opacity > 0.01) {
+      applyFadeZoomStyle(overlayUi.map, overlay.zoomRect, overlay.zoomProgress ?? 0);
+    } else {
+      applyFadeZoomStyle(overlayUi.map, null, 0);
+    }
   }
 
   syncVideoPreviewMotion(at);
@@ -1714,21 +2300,57 @@ function generateVideoButton(total, videoOut) {
 
 const app = document.getElementById("app");
 
-function render() {
-  // Don't rebuild the tree while an inline rename or brief field is focused —
-  // that steals the caret on every keypress / incidental redraw (e.g. autosave).
-  const active = document.activeElement;
-  if (
-    active &&
-    (active.classList?.contains("name-edit") ||
-      active.classList?.contains("brief-input") ||
-      active.classList?.contains("destination-input") ||
-      active.classList?.contains("destination-name") ||
-      active.classList?.contains("destination-prompt") ||
-      active.classList?.contains("cast-note"))
-  ) {
-    return;
+const SCROLL_SELS = [".stage", ".video-page", ".library", ".library.tools"];
+
+function captureScroll() {
+  return {
+    winX: window.scrollX,
+    winY: window.scrollY,
+    panels: SCROLL_SELS.map((sel) => {
+      const el = document.querySelector(sel);
+      return el ? { sel, top: el.scrollTop, left: el.scrollLeft } : null;
+    }).filter(Boolean),
+  };
+}
+
+function restoreScroll(saved) {
+  if (!saved) return;
+  window.scrollTo(saved.winX, saved.winY);
+  for (const panel of saved.panels) {
+    const el = document.querySelector(panel.sel);
+    if (!el) continue;
+    el.scrollTop = panel.top;
+    el.scrollLeft = panel.left;
   }
+}
+
+function isTypingFocus(el) {
+  if (!el || el === document.body || el === document.documentElement) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag !== "INPUT") return false;
+  const type = (el.type || "text").toLowerCase();
+  return ![
+    "checkbox",
+    "radio",
+    "button",
+    "submit",
+    "reset",
+    "file",
+    "range",
+    "color",
+    "hidden",
+  ].includes(type);
+}
+
+function render() {
+  // Don't rebuild the tree while a text field is focused — replaceChildren
+  // steals the caret (scene title, rename, briefs, etc. after autosave).
+  if (isTypingFocus(document.activeElement)) return;
+
+  invalidateTimelineCache();
+  const savedScroll = captureScroll();
 
   scrubber = null;
   if (state.page !== "list" && state.page !== "landing") {
@@ -1747,6 +2369,10 @@ function render() {
   else if (state.page === "list") app.replaceChildren(listView());
   else if (state.page === "scene") app.replaceChildren(sceneView());
   else app.replaceChildren(videoView());
+
+  restoreScroll(savedScroll);
+  // Layout can settle after the first paint; restore again so we don't jump to top.
+  requestAnimationFrame(() => restoreScroll(savedScroll));
 
   paintPlayhead();
 }
@@ -2758,7 +3384,7 @@ function sceneCard(index, item) {
 function transitionCard(index, item) {
   const entry = scenes()[index];
   const selected = state.placingTransition === index;
-  const mapHold = Number(entry?.map?.seconds) || 0;
+  const mapHold = transitionTiming(entry).total;
   const known = item.image && !item.missing;
 
   return h(
@@ -3038,7 +3664,7 @@ function pictureStage(known, image) {
         onPointerdown: (event) => {
           if (
             event.target.closest(
-              ".anim-layer, .picture-expand, .picture-download, .picture-region-tools, .region-capture"
+              ".anim-layer, .fade-zoom-guide, .picture-expand, .picture-download, .picture-region-tools, .region-capture"
             )
           )
             return;
@@ -3056,6 +3682,12 @@ function pictureStage(known, image) {
             },
           })
         : h("span", { class: "picture-empty", text: "Pick a picture from Images" }),
+      isTransitionScene() &&
+        transitionStyleOf(scene()) === "fade_zoom" &&
+        fadeZoomGuide("start"),
+      isTransitionScene() &&
+        transitionStyleOf(scene()) === "fade_zoom" &&
+        fadeZoomGuide("end"),
       ...sceneAnims().map((entry, index) => animLayer(normalizeAnim(entry), index)),
       // Effects sit above animation overlays.
       ...sceneEffects()
@@ -3255,7 +3887,8 @@ function bindChromaCanvas(video, canvas, path) {
 function sceneView() {
   const current = scene();
   const transition = isTransitionScene(current);
-  const { list, total } = sceneSequence(state.sceneIndex);
+  const { list } = sceneSequence(state.sceneIndex);
+  const total = scenePlayTotal(state.sceneIndex);
   const image = current.image;
   const known = image && imageExists(image);
   const bar = playerBar(total, "scene");
@@ -3263,8 +3896,8 @@ function sceneView() {
     ? { node: null, rows: [] }
     : playlist(list);
   if (scrubber) scrubber.rows = rows;
-  const mapSeconds = Number(current.map?.seconds);
-  const mapHold = Number.isFinite(mapSeconds) ? mapSeconds : 0;
+  const timing = transition ? transitionTiming(current) : null;
+  const mapHold = timing?.total || 0;
 
   app.classList.toggle("is-expanded", state.pictureExpanded);
 
@@ -3320,7 +3953,8 @@ function sceneView() {
                   current.is_transition = true;
                   current.tracks = [];
                   current.transition_in = current.transition_in || "fade";
-                  current.transition_out = current.transition_out || "fade";
+                  current.transition_out = current.transition_out || current.transition_in || "fade";
+                  if (transitionStyleOf(current) === "fade_zoom") ensureFadeZoom(current);
                   if (!current.map || typeof current.map !== "object") {
                     current.map = { seconds: DEFAULT_MAP_SECONDS };
                   } else if (!(Number(current.map.seconds) > 0)) {
@@ -3356,36 +3990,44 @@ function sceneView() {
                 h("span", { text: "Map overlay" }),
                 h("span", {
                   class: "meta",
-                  text: mapHold > 0 ? `${clock(mapHold / 2)} each side` : "—",
+                  text:
+                    mapHold > 0
+                      ? `${clock(timing.outHold)} before · ${clock(timing.inHold)} after`
+                      : "—",
                 })
               ),
               h("p", {
                 class: "meta transition-note",
-                text: "Visual track only — the audio track is unchanged. The map fades over the end of the previous scene and the start of the next while their songs keep playing underneath.",
+                text: "Visual only — neighbors keep their songs (hard cut at the midpoint). Length is map + any included zoom. Fade is the alpha in/out at each edge. Play above to preview.",
               }),
               h(
                 "div",
                 { class: "transition-fx-row" },
-                transitionFxSelect(current.transition_in || "fade", (next) => {
+                transitionFxSelect(transitionStyleOf(current), (next) => {
                   current.transition_in = next;
-                  changed();
-                }, "Fade in"),
-                transitionFxSelect(current.transition_out || "fade", (next) => {
                   current.transition_out = next;
+                  if (next === "fade_zoom") ensureFadeZoom(current);
                   changed();
-                }, "Fade out")
+                }, "Style")
               ),
+              transitionStyleOf(current) === "fade_zoom" && fadeZoomFields(current),
+              transitionDurationFields(current),
               (() => {
                 const list = scenes();
                 const prev = list[state.sceneIndex - 1];
                 const next = list[state.sceneIndex + 1];
-                const half = mapHold > 0 ? clock(mapHold / 2) : "—";
                 const rows = [
                   prev && !prev.is_transition
-                    ? { title: `Over “${prev.title || "Previous"}” (end)`, len: half }
+                    ? {
+                        title: `Over “${prev.title || "Previous"}” (end)`,
+                        len: timing.outHold > 0 ? clock(timing.outHold) : "—",
+                      }
                     : null,
                   next && !next.is_transition
-                    ? { title: `Over “${next.title || "Next"}” (start)`, len: half }
+                    ? {
+                        title: `Over “${next.title || "Next"}” (start)`,
+                        len: timing.inHold > 0 ? clock(timing.inHold) : "—",
+                      }
                     : null,
                 ].filter(Boolean);
                 return rows.length
@@ -3405,32 +4047,7 @@ function sceneView() {
                       class: "meta transition-note",
                       text: "Place this between two scenes that each have songs.",
                     });
-              })(),
-              h(
-                "label",
-                { class: "transition-map-hold" },
-                h("span", { text: "Map hold (seconds)" }),
-                h("input", {
-                  type: "number",
-                  min: "0",
-                  step: "1",
-                  value: String(mapHold),
-                  title: "Total map time across the cut — half on each neighboring scene.",
-                  onChange: (event) => {
-                    const next = Math.max(0, Number(event.target.value) || 0);
-                    if (!current.map || typeof current.map !== "object") current.map = {};
-                    current.map.seconds = next;
-                    changed();
-                  },
-                }),
-                h("span", {
-                  class: "meta",
-                  text:
-                    mapHold > 0
-                      ? `${clock(mapHold / 2)} before cut · ${clock(mapHold / 2)} after`
-                      : "No overlay",
-                })
-              )
+              })()
             )
           : [
               h(
@@ -4782,6 +5399,7 @@ function playerBar(total, mode) {
     h(
       "button",
       {
+        type: "button",
         class: "play",
         disabled: !total,
         title: player.playing ? "Pause" : "Play",

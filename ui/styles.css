@@ -1410,13 +1410,117 @@ button {
 }
 
 .transition-fx-select {
-  min-width: 120px;
+  min-width: 140px;
   padding: 4px 8px;
   border: 1px solid var(--line-strong);
   border-radius: 4px;
   background: var(--canvas);
   color: var(--ink);
   font: inherit;
+}
+
+.fade-zoom-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--soft);
+}
+
+.fade-zoom-includes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+}
+
+.fade-zoom-include {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.fade-zoom-include.on {
+  color: var(--ink);
+}
+
+.fade-zoom-include input {
+  margin: 0;
+  accent-color: var(--cta);
+}
+
+.fade-zoom-include .meta {
+  font-size: 12px;
+}
+
+.fade-zoom-guide {
+  position: absolute;
+  z-index: 2;
+  border: 2px dashed rgba(196, 85, 77, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+  background: rgba(196, 85, 77, 0.08);
+  cursor: grab;
+  touch-action: none;
+  pointer-events: auto;
+}
+
+.fade-zoom-guide.is-end {
+  z-index: 3;
+  border-color: rgba(35, 131, 226, 0.95);
+  background: rgba(35, 131, 226, 0.1);
+}
+
+.fade-zoom-guide.dragging {
+  cursor: grabbing;
+}
+
+.fade-zoom-guide.is-start.dragging {
+  background: rgba(196, 85, 77, 0.16);
+}
+
+.fade-zoom-guide.is-end.dragging {
+  background: rgba(35, 131, 226, 0.18);
+}
+
+.fade-zoom-guide.is-preview-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.fade-zoom-label {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  user-select: none;
+}
+
+.fade-zoom-handle {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: rgba(196, 85, 77, 0.95);
+  border: 1.5px solid #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.fade-zoom-guide.is-end .fade-zoom-handle {
+  background: rgba(35, 131, 226, 0.95);
 }
 
 .scene-title-row {
@@ -1492,12 +1596,19 @@ button {
   border-top: none;
 }
 
-.transition-map-hold {
+.transition-duration-fields {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-  font-size: 13px;
+  align-items: flex-end;
+  gap: 12px 16px;
+}
+
+.transition-map-hold {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .transition-map-hold input {
@@ -1508,6 +1619,10 @@ button {
   background: var(--canvas);
   color: var(--ink);
   font: inherit;
+}
+
+.transition-duration-total {
+  padding-bottom: 6px;
 }
 
 .scene-title {
@@ -1779,7 +1894,12 @@ button {
 .picture-map-overlay {
   z-index: 5;
   pointer-events: none;
-  transition: opacity 80ms linear;
+  /* No CSS transition — video preview updates every frame; easing looked choppy. */
+  will-change: transform, opacity;
+}
+
+.stage .picture-still {
+  will-change: transform;
 }
 
 .picture-map-overlay.is-hidden {
