@@ -177,6 +177,8 @@ class MapBridge:
     fade_seconds: float = 3.0  # alpha fade in/out at overlay edges
     # mid = between two scenes; open = before first; close = after last
     mode: str = "mid"
+    # Map-locked animation patches (composited before Ken Burns zoom).
+    animations: list[dict] = field(default_factory=list)
 
     @property
     def out_hold(self) -> float:
@@ -437,6 +439,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
         map_edits = parse_still_edits(root, cfg.get("edits"))
         if map_edits:
             map_image = fuse_still_edits(map_image, map_edits)
+        map_anims = parse_animations(root, cfg.get("animations"))
 
         bridge = MapBridge(
             map_image=map_image,
@@ -451,6 +454,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             zoom_in_span=zoom_in_span,
             fade_seconds=edge_fade,
             mode=mode,
+            animations=map_anims,
         )
         if mode == "open" and next_i is not None:
             bridges_before[next_i] = bridge
@@ -711,6 +715,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                     "zoom_dir": zoom_dir,
                     "zoom_span": zoom_span,
                     "zoom_out_span": zoom_out_span,
+                    "animations": list(incoming.animations or []),
                 }
             )
         if out_hold > 0.001 and outgoing:
@@ -759,6 +764,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                     "zoom_dir": zoom_dir,
                     "zoom_span": zoom_span,
                     "zoom_out_span": zoom_out_span,
+                    "animations": list(outgoing.animations or []),
                 }
             )
 
@@ -960,6 +966,62 @@ def parse_still_edits(root: Path, raw_edits) -> list[dict]:
     return edits
 
 
+def parse_animations(root: Path, raw_anims) -> list[dict]:
+    """Normalize filled animation slots from a scene / transition template."""
+    animations: list[dict] = []
+    for entry in raw_anims or []:
+        if isinstance(entry, str):
+            entry = {"file": entry}
+        source = entry.get("file")
+        if not source:
+            continue
+        brightness = float(entry.get("brightness", 100))
+        brightness = max(20.0, min(brightness, 200.0))
+        saturation = float(entry.get("saturation", 100))
+        saturation = max(0.0, min(saturation, 200.0))
+        speed = float(entry.get("speed", 100))
+        speed = max(25.0, min(speed, 200.0))
+        aspect = entry.get("aspect", "native")
+        if aspect not in ("native", "landscape", "portrait"):
+            aspect = "native"
+        loop_in = entry.get("loop_in")
+        loop_out = entry.get("loop_out")
+        in_at = None if loop_in is None else float(loop_in)
+        out_at = None if loop_out is None else float(loop_out)
+        if in_at is not None and in_at <= 0:
+            in_at = None
+        if out_at is not None and out_at <= 0:
+            out_at = None
+        height = entry.get("h")
+        h_val = None if height is None else float(height)
+        if h_val is not None and h_val <= 0:
+            h_val = None
+        animations.append(
+            {
+                "path": resolve(root, source, "animation"),
+                "x": float(entry.get("x", 0.36)),
+                "y": float(entry.get("y", 0.28)),
+                "w": float(entry.get("w", 0.28)),
+                "h": h_val,
+                "brightness": brightness,
+                "saturation": saturation,
+                "speed": speed,
+                "aspect": aspect,
+                "soft_edges": bool(entry.get("soft_edges", False)),
+                "loop_in": in_at,
+                "loop_out": out_at,
+            }
+        )
+    return animations
+
+
+def image_size(path: Path) -> tuple[int, int]:
+    Image, _, _ = _pil()
+    with Image.open(path) as im:
+        w, h = im.size
+    return max(2, (w // 2) * 2), max(2, (h // 2) * 2)
+
+
 def _edit_box_norm(edit: dict) -> tuple[float, float, float, float]:
     """Normalized crop box on a 3:2 picture frame (matches ui regionCropNorm)."""
     x = min(1.0, max(0.0, float(edit["x"])))
@@ -1147,6 +1209,7 @@ def collect_bridge_overlays(scenes: list[Scene]) -> list[dict]:
                     "zoom_dir": overlay.get("zoom_dir") or "in",
                     "zoom_span": float(overlay.get("zoom_span") or 0),
                     "zoom_out_span": float(overlay.get("zoom_out_span") or 0),
+                    "animations": list(overlay.get("animations") or []),
                 }
             )
     return events
@@ -1179,13 +1242,14 @@ def bridge_map_filter(
     zoom_span: float = 0.0,
     zoom_start: dict | None = None,
     zoom_out_span: float = 0.0,
+    include_fps: bool = True,
 ) -> str:
     """Filter chain for a map overlay: optional Ken Burns zoom + alpha fade."""
     frames = max(1, int(round(duration * fps)))
     fade_in = min(max(0.0, fade_in), duration)
     fade_out = min(max(0.0, fade_out), max(0.0, duration - fade_in))
 
-    parts: list[str] = [f"fps={fps}"]
+    parts: list[str] = [f"fps={fps}"] if include_fps else []
 
     if style == "fade_zoom" and (isinstance(zoom, dict) or isinstance(zoom_start, dict)):
         zx, zy, zw, zh = _zoom_rect(zoom if isinstance(zoom, dict) else zoom_start)
@@ -1424,7 +1488,27 @@ def build_command(
                 "-i", str(event["image"]),
             ]
         bridge_base = audio_offset
-        overlay_base = bridge_base + len(bridge_events)
+        bridge_anim_base = bridge_base + len(bridge_events)
+        bridge_anim_by_event: dict[int, list[tuple[int, dict]]] = {
+            i: [] for i in range(len(bridge_events))
+        }
+        bridge_anim_count = 0
+        for event_i, event in enumerate(bridge_events):
+            hold = max(float(event["duration"]), 0.1)
+            for anim in event.get("animations") or []:
+                looped = seamless_loop_clip(
+                    anim["path"],
+                    fps,
+                    start=anim.get("loop_in"),
+                    end=anim.get("loop_out"),
+                )
+                bridge_anim_by_event[event_i].append((bridge_anim_base + bridge_anim_count, anim))
+                bridge_anim_count += 1
+                cmd += [
+                    "-stream_loop", "-1",
+                    "-i", str(looped),
+                ]
+        overlay_base = bridge_anim_base + bridge_anim_count
         for event in collect_overlay_events(scenes, overlays):
             png = overlay_png_for(event, height)
             overlay_inputs.append((event, png))
@@ -1618,6 +1702,7 @@ def build_command(
 
         current = "vbase"
         # Silent map bridges — visual only, scene audio continues underneath.
+        # Animations are stamped onto the map *before* Ken Burns so they stay locked.
         for step, event in enumerate(bridge_events):
             input_index = bridge_base + step
             start = max(0.0, float(event["start"]))
@@ -1626,7 +1711,8 @@ def build_command(
             fade_out = min(float(event["fade_out"]), max(0.0, duration * 0.45))
             if fade_in + fade_out > duration:
                 fade_out = max(0.0, duration - fade_in)
-            chain = bridge_map_filter(
+            anims = bridge_anim_by_event.get(step) or []
+            zoom_chain = bridge_map_filter(
                 width=width,
                 height=height,
                 fps=fps,
@@ -1639,12 +1725,89 @@ def build_command(
                 zoom_span=float(event.get("zoom_span") or 0),
                 zoom_start=event.get("zoom_start"),
                 zoom_out_span=float(event.get("zoom_out_span") or 0),
+                include_fps=not anims,
             )
             ov = f"map{step}"
             out = f"vm{step}"
-            graph.append(
-                f"[{input_index}:v]{chain},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
-            )
+            if not anims:
+                graph.append(
+                    f"[{input_index}:v]{zoom_chain},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
+                )
+            else:
+                mw, mh = image_size(Path(event["image"]))
+                base = f"bm{step}x0"
+                graph.append(
+                    f"[{input_index}:v]fps={fps},"
+                    f"trim=duration={duration:.3f},setpts=PTS-STARTPTS,"
+                    f"scale={mw}:{mh}:force_original_aspect_ratio=increase:flags=lanczos,"
+                    f"crop={mw}:{mh},setsar=1,format=rgba[{base}]"
+                )
+                layer = base
+                for anim_step, (anim_index, anim) in enumerate(anims):
+                    rate = max(0.1, min(float(anim.get("speed", 100)) / 100.0, 4.0))
+                    aw = max(2, int(round(mw * max(0.05, min(anim["w"], 1.0)) / 2) * 2))
+                    ax = int(round(mw * max(0.0, min(anim["x"], 1.0))))
+                    ay = int(round(mh * max(0.0, min(anim["y"], 1.0))))
+                    ah = anim.get("h")
+                    aspect = anim.get("aspect", "native")
+                    if ah is not None and float(ah) > 0:
+                        ah = max(2, int(round(mh * max(0.05, min(float(ah), 1.0)) / 2) * 2))
+                        scale = (
+                            f"scale={aw}:{ah}:force_original_aspect_ratio=increase:flags=lanczos,"
+                            f"crop={aw}:{ah},setsar=1"
+                        )
+                    elif aspect == "portrait":
+                        ah = max(2, int(round(aw * 16 / 9 / 2) * 2))
+                        scale = (
+                            f"scale={aw}:{ah}:force_original_aspect_ratio=increase:flags=lanczos,"
+                            f"crop={aw}:{ah},setsar=1"
+                        )
+                    elif aspect == "landscape":
+                        ah = max(2, int(round(aw * 9 / 16 / 2) * 2))
+                        scale = (
+                            f"scale={aw}:{ah}:force_original_aspect_ratio=increase:flags=lanczos,"
+                            f"crop={aw}:{ah},setsar=1"
+                        )
+                    else:
+                        scale = f"scale={aw}:-2:flags=lanczos,setsar=1"
+                    eq_bright = max(
+                        -1.0, min(1.0, (float(anim.get("brightness", 100)) - 100.0) / 100.0)
+                    )
+                    eq_sat = max(0.0, min(float(anim.get("saturation", 100)) / 100.0, 3.0))
+                    eq_parts = []
+                    if abs(eq_bright) > 0.001:
+                        eq_parts.append(f"brightness={eq_bright:.4f}")
+                    if abs(eq_sat - 1.0) > 0.001:
+                        eq_parts.append(f"saturation={eq_sat:.4f}")
+                    bright_filter = f",eq={':'.join(eq_parts)}" if eq_parts else ""
+                    if anim.get("soft_edges"):
+                        pix = (
+                            "format=rgba,"
+                            "geq="
+                            "r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
+                            "a='min(min(255*min(X\\,W-1-X)/(0.12*W)\\,"
+                            "255*min(Y\\,H-1-Y)/(0.12*H))\\,255)'"
+                        )
+                    else:
+                        pix = "format=rgba"
+                    an = f"ba{step}x{anim_step}"
+                    nxt = f"bm{step}x{anim_step + 1}"
+                    graph.append(
+                        f"[{anim_index}:v]fps={fps},"
+                        f"setpts=PTS/{rate:.4f},"
+                        f"trim=duration={duration:.3f},setpts=PTS-STARTPTS,"
+                        f"{scale}{bright_filter},"
+                        f"{pix}[{an}]"
+                    )
+                    graph.append(
+                        f"[{layer}][{an}]overlay="
+                        f"x='min({ax}\\,main_w-overlay_w)':y='min({ay}\\,main_h-overlay_h)':"
+                        f"shortest=1:format=auto[{nxt}]"
+                    )
+                    layer = nxt
+                graph.append(
+                    f"[{layer}]{zoom_chain},setpts=PTS-STARTPTS+{start:.3f}/TB[{ov}]"
+                )
             graph.append(
                 f"[{current}][{ov}]overlay=0:0:eof_action=pass:format=auto[{out}]"
             )

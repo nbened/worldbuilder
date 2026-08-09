@@ -2091,6 +2091,13 @@ button {
   color: var(--faint);
 }
 
+.picture-zoom-plane {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  will-change: transform;
+}
+
 .picture-still,
 .picture-fx-wrap,
 .picture-fx {

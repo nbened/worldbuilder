@@ -2163,16 +2163,24 @@ function startOverlayClock() {
   overlayRaf = requestAnimationFrame(tick);
 }
 
+/** Map + locked edits/anims share one plane so fade-zoom keeps them pinned to the map. */
+function transitionZoomPlane() {
+  return (
+    document.querySelector(".stage .picture-zoom-plane") ||
+    document.querySelector(".stage .picture-still")
+  );
+}
+
 /** Edit on the full map; only animate zoom while play is running. */
 function syncSceneTransitionPreview() {
   if (!isTransitionPreview()) return;
-  const still = document.querySelector(".stage .picture-still");
+  const plane = transitionZoomPlane();
   const guides = document.querySelectorAll(".stage .fade-zoom-guide");
-  if (!still) return;
+  if (!plane) return;
 
   // Default / paused: full map so included Start/End targets can be placed.
   if (!player.playing) {
-    applyFadeZoomStyle(still, null, 0);
+    applyFadeZoomStyle(plane, null, 0);
     guides.forEach((guide) => guide.classList.remove("is-preview-hidden"));
     return;
   }
@@ -2184,7 +2192,7 @@ function syncSceneTransitionPreview() {
   const hold = Math.max(0.001, timing.total);
   const at = Math.min(hold, Math.max(0, player.at));
   const zoom = transitionZoomAt(entry, index, at);
-  applyFadeZoomStyle(still, zoom.zoomRect, zoom.zoomProgress);
+  applyFadeZoomStyle(plane, zoom.zoomRect, zoom.zoomProgress);
   guides.forEach((guide) => guide.classList.add("is-preview-hidden"));
 }
 
@@ -4550,28 +4558,33 @@ function pictureStage(known, image) {
           }
         },
       },
-      known
-        ? h("div", {
-            class: "picture-still",
-            style: {
-              backgroundImage: `url(/thumb?path=${encodeURIComponent(image)}&w=${expanded ? 1600 : 1200})`,
-            },
-          })
-        : h("span", { class: "picture-empty", text: "Pick a picture from Images" }),
+      h(
+        "div",
+        { class: "picture-zoom-plane" },
+        known
+          ? h("div", {
+              class: "picture-still",
+              style: {
+                backgroundImage: `url(/thumb?path=${encodeURIComponent(image)}&w=${
+                  expanded ? 1600 : 1200
+                })`,
+              },
+            })
+          : h("span", { class: "picture-empty", text: "Pick a picture from Images" }),
+        // Still edits sit under animation overlays — all locked to the map zoom plane.
+        ...sceneEdits().map((entry, index) => editLayer(normalizeEdit(entry), index)),
+        ...sceneAnims().map((entry, index) => animLayer(normalizeAnim(entry), index)),
+        ...sceneEffects()
+          .map((entry) => normalizeEffect(entry))
+          .filter((entry) => state.assets.effects.some((effect) => effect.path === entry.file))
+          .map((entry) => effectLayer(entry.file, entry.speed))
+      ),
       isTransitionScene() &&
         transitionStyleOf(scene()) === "fade_zoom" &&
         fadeZoomGuide("start"),
       isTransitionScene() &&
         transitionStyleOf(scene()) === "fade_zoom" &&
         fadeZoomGuide("end"),
-      // Still edits sit under animation overlays.
-      ...sceneEdits().map((entry, index) => editLayer(normalizeEdit(entry), index)),
-      ...sceneAnims().map((entry, index) => animLayer(normalizeAnim(entry), index)),
-      // Effects sit above animation overlays.
-      ...sceneEffects()
-        .map((entry) => normalizeEffect(entry))
-        .filter((entry) => state.assets.effects.some((effect) => effect.path === entry.file))
-        .map((entry) => effectLayer(entry.file, entry.speed)),
       regionOn &&
         h("div", {
           class: "region-capture",
