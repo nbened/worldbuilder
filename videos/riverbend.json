@@ -31,11 +31,28 @@
           "x": 0.6468195952132797,
           "y": 0.00011064854731740372,
           "w": 0.3531804047867203,
+          "h": null,
           "brightness": 100,
           "saturation": 150,
           "speed": 100,
           "aspect": "native",
           "soft_edges": true,
+          "locked": false,
+          "loop_in": null,
+          "loop_out": null
+        },
+        {
+          "file": "assets/animations/Generated video 1 (3).mp4",
+          "x": 0.0009519535148453094,
+          "y": 0.21869348765847213,
+          "w": 0.13469916855741645,
+          "h": 0.3591977828197772,
+          "brightness": 100,
+          "saturation": 100,
+          "speed": 100,
+          "aspect": "portrait",
+          "soft_edges": true,
+          "locked": false,
           "loop_in": null,
           "loop_out": null
         }
@@ -65,11 +82,13 @@
           "x": 0,
           "y": 0.000244140625,
           "w": 0.32823418222821604,
+          "h": null,
           "brightness": 100,
           "saturation": 100,
           "speed": 100,
           "aspect": "native",
           "soft_edges": true,
+          "locked": false,
           "loop_in": null,
           "loop_out": null
         },
@@ -78,11 +97,13 @@
           "x": 0.5712259855289421,
           "y": 0.3601775355538922,
           "w": 0.37715334955089824,
+          "h": null,
           "brightness": 100,
           "saturation": 100,
           "speed": 100,
           "aspect": "native",
           "soft_edges": true,
+          "locked": false,
           "loop_in": null,
           "loop_out": null
         }
@@ -152,21 +173,6 @@
       ],
       "image_prompt": "SCENE: A fire clearing on a wooded ridge above the town, at dusk.\n\nA ring of rough grey stones encircles a small campfire burning low \nand bright at the center of a gravel clearing. Four handcrafted \nfigures sit around it in weathered wooden Adirondack chairs, angled \ninward toward the flames, seated naturally with relaxed posture. A \nfifth figure sits slightly apart on a fallen log at the edge of the \nring. A stack of split logs rests to one side, a battered tin coffee \npot sits on a flat stone near the fire, and an iron lantern hangs \nunlit from a low branch.\n\nThe clearing is enclosed by pines and autumn maples in deep rust and \namber, with mossy rock outcrops and drifts of fallen leaves across \nthe gravel. Through a gap in the trees at the far edge of the frame, \nfar below and softly out of focus, a few warm lit windows of the \ntown are just visible, with the faint glow of a locomotive headlamp \non the rail line beyond.\n\nLIGHT: The campfire is the dominant light source and the scene is lit \nalmost entirely by it. Warm orange light falls across the stones, the \ngravel, the chairs, and the figures' faces and hands, falling off \nquickly into darkness at the edges of the clearing. Long soft shadows \nstretch outward from the fire ring. Above the treeline the sky is \ndeep dusk blue, the last cold light of the day, contrasting against \nthe warm firelight below.\n\nCAST: One figure wears a dusty rose coat, the only cool pink in the \nframe. She stands at the edge of the clearing near the stacked logs, \nhalf turned away, partially obscured by a chair back. She is small in \nframe and not the focal point.\n\nCAMERA: Elevated three-quarter view, roughly forty degrees above the \nclearing, close in, as if leaning over a model railway table. Never at \nthe figures' eye level. Shallow tilt-shift depth of field with the \nfire ring in sharp focus and the treeline and distant town softly \nblurred.\n\nMOOD: Quiet, intimate, the end of the day. Warm but with an ache \nunder it, the last good evening before the season turns.",
       "music_prompt": "Solo fingerpicked acoustic archtop guitar, close-mic'd and intimate.\nA single fiddle sustains a low drone far in the background, almost\ninaudible. No bass, no drums, no piano. D minor, 58 BPM, free and\nunhurried, slight rubato. Sparse, lots of space between phrases.\nVery quiet dynamics throughout, never builds."
-    },
-    {
-      "title": "Scene 4",
-      "image": "assets/images/ChatGPT Image Aug 8, 2026, 05_36_44 PM.png",
-      "map": {
-        "seconds": 0
-      },
-      "pan": "none",
-      "zoom": 1,
-      "tracks": [],
-      "sounds": [],
-      "effects": [],
-      "animations": [],
-      "image_prompt": "",
-      "music_prompt": ""
     }
   ],
   "overlays": {

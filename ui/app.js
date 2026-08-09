@@ -22,6 +22,8 @@ const state = {
   pruneAnims: false,
   renamingPath: null,
   pictureExpanded: false,
+  regionTool: false,
+  regionAspect: "landscape", // landscape = 16:9, portrait = 9:16
   detailsDirty: false,
   detailsOpen: false,
   sceneDetailsOpen: false,
@@ -394,11 +396,13 @@ function normalizeAnim(entry) {
       x: 0.36,
       y: 0.28,
       w: 0.28,
+      h: null,
       brightness: 100,
       saturation: 100,
       speed: 100,
       aspect: "native",
       soft_edges: false,
+      locked: false,
       loop_in: null,
       loop_out: null,
     };
@@ -410,20 +414,43 @@ function normalizeAnim(entry) {
     entry.aspect === "landscape" || entry.aspect === "portrait" ? entry.aspect : "native";
   const loopIn = Number(entry.loop_in);
   const loopOut = Number(entry.loop_out);
+  const height = Number(entry.h);
   return {
     file: entry.file || "",
     x: Number.isFinite(entry.x) ? entry.x : 0.36,
     y: Number.isFinite(entry.y) ? entry.y : 0.28,
     w: Number.isFinite(entry.w) ? entry.w : 0.28,
+    // Optional normalized height from a drawn region slot (picture is 3:2).
+    h: Number.isFinite(height) && height > 0 ? Math.min(1, height) : null,
     brightness: Number.isFinite(brightness) ? Math.min(200, Math.max(20, brightness)) : 100,
     saturation: Number.isFinite(saturation) ? Math.min(200, Math.max(0, saturation)) : 100,
     speed: Number.isFinite(speed) ? Math.min(200, Math.max(25, speed)) : 100,
     aspect,
     soft_edges: !!entry.soft_edges,
+    locked: !!entry.locked,
     // 0 means “unset / use the full clip”, not a zero-second out point.
     loop_in: Number.isFinite(loopIn) && loopIn > 0 ? Math.max(0, loopIn) : null,
     loop_out: Number.isFinite(loopOut) && loopOut > 0 ? Math.max(0, loopOut) : null,
   };
+}
+
+function isPendingAnim(entry) {
+  return !normalizeAnim(entry).file;
+}
+
+function animLayerStyle(entry, video = null) {
+  const style = {
+    left: `${entry.x * 100}%`,
+    top: `${entry.y * 100}%`,
+    width: `${entry.w * 100}%`,
+  };
+  if (Number.isFinite(entry.h) && entry.h > 0) {
+    style.height = `${entry.h * 100}%`;
+    style.aspectRatio = "auto";
+  } else {
+    style.aspectRatio = animAspectCss(entry, video);
+  }
+  return style;
 }
 
 function animCssFilter(entry) {
@@ -453,7 +480,268 @@ function animAspectCss(entry, video = null) {
   if (video?.videoWidth && video?.videoHeight) {
     return `${video.videoWidth} / ${video.videoHeight}`;
   }
+  // Picture frame is 3:2 — turn a normalized w×h box into CSS aspect-ratio.
+  if (Number.isFinite(entry.h) && entry.h > 0 && entry.w > 0) {
+    return `${entry.w * 3} / ${entry.h * 2}`;
+  }
   return "auto";
+}
+
+function regionIcon() {
+  return h(
+    "svg",
+    {
+      class: "icon",
+      viewBox: "0 0 16 16",
+      width: "14",
+      height: "14",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.5",
+      "aria-hidden": true,
+    },
+    h("path", { d: "M3 5.5V3h2.5M10.5 3H13v2.5M13 10.5V13h-2.5M5.5 13H3v-2.5" }),
+    h("rect", { x: "5", y: "5", width: "6", height: "6", rx: "0.5" })
+  );
+}
+
+function loadImageElement(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not load scene image"));
+    image.src = url;
+  });
+}
+
+function animCropNorm(entry, video = null) {
+  const normalized = normalizeAnim(entry);
+  let height = normalized.h;
+  if (!(Number.isFinite(height) && height > 0)) {
+    let ratio = null;
+    if (video?.videoWidth && video?.videoHeight) ratio = video.videoWidth / video.videoHeight;
+    else if (normalized.aspect === "landscape") ratio = 16 / 9;
+    else if (normalized.aspect === "portrait") ratio = 9 / 16;
+    // Picture is 3:2: h = (w * picW / ratio) / picH = w * (3/2) / ratio
+    if (ratio) height = (normalized.w * 1.5) / ratio;
+  }
+  if (!(Number.isFinite(height) && height > 0)) height = normalized.w * 0.75;
+  return {
+    x: Math.min(1, Math.max(0, normalized.x)),
+    y: Math.min(1, Math.max(0, normalized.y)),
+    w: Math.min(1 - normalized.x, Math.max(0.01, normalized.w)),
+    h: Math.min(1 - normalized.y, Math.max(0.01, height)),
+  };
+}
+
+async function exportAnimRegionStill(index, { clipboard = true } = {}) {
+  const list = sceneAnims();
+  if (index == null || index < 0 || index >= list.length) return;
+  const entry = normalizeAnim(list[index]);
+  list[index] = entry;
+
+  const imagePath = scene()?.image;
+  if (!imagePath || !imageExists(imagePath)) {
+    state.note = "No scene image to crop";
+    render();
+    return;
+  }
+  try {
+    const image = await loadImageElement(`/${imagePath}`);
+    const box = animCropNorm(entry);
+    const sx = Math.round(box.x * image.naturalWidth);
+    const sy = Math.round(box.y * image.naturalHeight);
+    const sw = Math.max(1, Math.round(box.w * image.naturalWidth));
+    const sh = Math.max(1, Math.round(box.h * image.naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = sw;
+    canvas.height = sh;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, sx, sy, sw, sh, 0, 0, sw, sh);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) throw new Error("Could not export crop");
+
+    const stem = baseName(imagePath) || "scene";
+    const name = `${stem}-region-${Math.round(box.x * 100)}-${Math.round(box.y * 100)}.png`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+    URL.revokeObjectURL(url);
+
+    entry.locked = true;
+    if (clipboard && navigator.clipboard?.write && window.ClipboardItem) {
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        state.note = "Copied and locked — drag/resize disabled for this slot";
+      } catch {
+        state.note = "Downloaded and locked — drag/resize disabled for this slot";
+      }
+    } else {
+      state.note = "Downloaded and locked — drag/resize disabled for this slot";
+    }
+    changed();
+  } catch (error) {
+    state.note = error.message || "Could not export region";
+    render();
+  }
+}
+
+// Picture frame is 3:2. Region crops must be 16:9 or 9:16 in pixel space.
+// Normalized w/h = pixelAspect × (2/3).
+function regionNormWH(aspect = state.regionAspect) {
+  const pixel = aspect === "portrait" ? 9 / 16 : 16 / 9;
+  return pixel * (2 / 3);
+}
+
+function fitRegionBox(x0, y0, x1, y1, aspect = state.regionAspect) {
+  const want = regionNormWH(aspect);
+  const signX = x1 >= x0 ? 1 : -1;
+  const signY = y1 >= y0 ? 1 : -1;
+  let w = Math.abs(x1 - x0);
+  let h = Math.abs(y1 - y0);
+  if (w < 0.001 && h < 0.001) return { x: x0, y: y0, w: 0, h: 0 };
+
+  if (w / Math.max(h, 1e-9) > want) h = w / want;
+  else w = h * want;
+
+  // Stay inside the picture from the drag origin corner.
+  const maxW = signX > 0 ? 1 - x0 : x0;
+  const maxH = signY > 0 ? 1 - y0 : y0;
+  if (w > maxW) {
+    w = maxW;
+    h = w / want;
+  }
+  if (h > maxH) {
+    h = maxH;
+    w = h * want;
+  }
+  if (w > maxW) {
+    w = maxW;
+    h = w / want;
+  }
+
+  return {
+    x: signX > 0 ? x0 : x0 - w,
+    y: signY > 0 ? y0 : y0 - h,
+    w,
+    h,
+  };
+}
+
+function applyAnimAspect(entry, aspect) {
+  if (entry.locked) return;
+  const next = aspect === "portrait" ? "portrait" : "landscape";
+  entry.aspect = next;
+  const want = regionNormWH(next);
+  const cx = entry.x + entry.w / 2;
+  const cy = entry.y + (entry.h || entry.w / want) / 2;
+  let w = Math.min(1, Math.max(0.05, entry.w));
+  let h = w / want;
+  if (h > 1) {
+    h = 1;
+    w = h * want;
+  }
+  entry.w = w;
+  entry.h = h;
+  entry.x = Math.min(1 - w, Math.max(0, cx - w / 2));
+  entry.y = Math.min(1 - h, Math.max(0, cy - h / 2));
+}
+
+function regionAspectToggle(current, onPick) {
+  return h(
+    "div",
+    { class: "region-aspect" },
+    h(
+      "button",
+      {
+        class: `region-aspect-btn${current === "landscape" ? " on" : ""}`,
+        type: "button",
+        title: "16:9 landscape",
+        onClick: (event) => {
+          event.stopPropagation();
+          onPick("landscape");
+        },
+      },
+      "16:9"
+    ),
+    h(
+      "button",
+      {
+        class: `region-aspect-btn${current === "portrait" ? " on" : ""}`,
+        type: "button",
+        title: "9:16 portrait",
+        onClick: (event) => {
+          event.stopPropagation();
+          onPick("portrait");
+        },
+      },
+      "9:16"
+    )
+  );
+}
+
+function beginRegionDraw(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const surface = event.currentTarget;
+  const picture = surface.closest(".picture");
+  if (!picture) return;
+  const box = picture.getBoundingClientRect();
+  const startX = Math.min(1, Math.max(0, (event.clientX - box.left) / box.width));
+  const startY = Math.min(1, Math.max(0, (event.clientY - box.top) / box.height));
+  const marquee = h("div", { class: "region-marquee" });
+  picture.append(marquee);
+  const aspect = state.regionAspect === "portrait" ? "portrait" : "landscape";
+
+  const paint = (rect) => {
+    marquee.style.left = `${rect.x * 100}%`;
+    marquee.style.top = `${rect.y * 100}%`;
+    marquee.style.width = `${rect.w * 100}%`;
+    marquee.style.height = `${rect.h * 100}%`;
+    return rect;
+  };
+  paint({ x: startX, y: startY, w: 0, h: 0 });
+
+  surface.setPointerCapture(event.pointerId);
+  let last = { x: startX, y: startY, w: 0, h: 0 };
+  const move = (moveEvent) => {
+    const x = Math.min(1, Math.max(0, (moveEvent.clientX - box.left) / box.width));
+    const y = Math.min(1, Math.max(0, (moveEvent.clientY - box.top) / box.height));
+    last = paint(fitRegionBox(startX, startY, x, y, aspect));
+  };
+  const up = () => {
+    surface.releasePointerCapture(event.pointerId);
+    surface.removeEventListener("pointermove", move);
+    surface.removeEventListener("pointerup", up);
+    surface.removeEventListener("pointercancel", up);
+    marquee.remove();
+    if (last.w < 0.04 || last.h < 0.04) {
+      state.note = "Draw a larger region";
+      render();
+      return;
+    }
+    const list = sceneAnims();
+    const slot = normalizeAnim({
+      file: "",
+      x: last.x,
+      y: last.y,
+      w: last.w,
+      h: last.h,
+      soft_edges: true,
+      aspect,
+    });
+    list.push(slot);
+    state.selectedAnim = list.length - 1;
+    state.regionTool = false;
+    state.note =
+      "Region saved — Copy still for Jim. Select this slot, then add the animated clip to fill it.";
+    changed();
+  };
+  surface.addEventListener("pointermove", move);
+  surface.addEventListener("pointerup", up);
+  surface.addEventListener("pointercancel", up);
 }
 
 const scenes = () => {
@@ -1108,7 +1396,7 @@ function exportActions({ sceneMode = false } = {}) {
           disabled: !sceneTotal,
           onClick: () => generate(sceneNumber),
         },
-        sceneOut?.ready ? "Re-render scene" : "Generate scene"
+        sceneOut?.ready || sceneOut?.exists ? "Update in video" : "Add to video"
       )
     );
     return actions;
@@ -2105,6 +2393,7 @@ function downloadIcon() {
 
 function pictureStage(known, image) {
   const expanded = state.pictureExpanded;
+  const regionOn = expanded && state.regionTool;
   return h(
     "div",
     { class: `picture-frame${expanded ? " is-expanded" : ""}` },
@@ -2123,6 +2412,36 @@ function pictureStage(known, image) {
         },
         downloadIcon()
       ),
+    expanded &&
+      known &&
+      h(
+        "div",
+        { class: "picture-region-tools" },
+        h(
+          "button",
+          {
+            class: `picture-region${regionOn ? " on" : ""}`,
+            type: "button",
+            title: regionOn ? "Cancel region tool" : "Draw a 16:9 or 9:16 region to clone",
+            "aria-label": regionOn ? "Cancel region tool" : "Draw region",
+            onClick: (event) => {
+              event.stopPropagation();
+              state.regionTool = !state.regionTool;
+              state.note = state.regionTool
+                ? `Draw a ${state.regionAspect === "portrait" ? "9:16" : "16:9"} region for Jim`
+                : "";
+              render();
+            },
+          },
+          regionIcon()
+        ),
+        regionOn &&
+          regionAspectToggle(state.regionAspect, (aspect) => {
+            state.regionAspect = aspect;
+            state.note = `Draw a ${aspect === "portrait" ? "9:16" : "16:9"} region for Jim`;
+            render();
+          })
+      ),
     h(
       "button",
       {
@@ -2133,6 +2452,7 @@ function pictureStage(known, image) {
         onClick: (event) => {
           event.stopPropagation();
           state.pictureExpanded = !state.pictureExpanded;
+          if (!state.pictureExpanded) state.regionTool = false;
           render();
         },
       },
@@ -2141,9 +2461,14 @@ function pictureStage(known, image) {
     h(
       "div",
       {
-        class: `picture${known ? "" : " blank"}`,
+        class: `picture${known ? "" : " blank"}${regionOn ? " region-mode" : ""}`,
         onPointerdown: (event) => {
-          if (event.target.closest(".anim-layer, .picture-expand, .picture-download")) return;
+          if (
+            event.target.closest(
+              ".anim-layer, .picture-expand, .picture-download, .picture-region-tools, .region-capture"
+            )
+          )
+            return;
           if (state.selectedAnim !== null) {
             state.selectedAnim = null;
             render();
@@ -2163,7 +2488,13 @@ function pictureStage(known, image) {
       ...sceneEffects()
         .map((entry) => normalizeEffect(entry))
         .filter((entry) => state.assets.effects.some((effect) => effect.path === entry.file))
-        .map((entry) => effectLayer(entry.file, entry.speed))
+        .map((entry) => effectLayer(entry.file, entry.speed)),
+      regionOn &&
+        h("div", {
+          class: "region-capture",
+          title: "Drag to draw a region",
+          onPointerdown: beginRegionDraw,
+        })
     )
   );
 }
@@ -2390,6 +2721,11 @@ function sceneView() {
         ),
         sceneDetails(),
         pictureStage(known, image),
+        sceneAnims().length > 0 &&
+          h("p", {
+            class: "anim-lock-note",
+            text: "Expand the picture to drag or resize. Copy still locks the slot in place.",
+          }),
         animControlsDial(),
         bar,
         renderStatus(),
@@ -2714,10 +3050,28 @@ function toggleSceneSound(path, on) {
   changed();
 }
 
+function fillAnimSlot(path) {
+  const list = sceneAnims();
+  if (sceneHasAnim(path)) return false;
+  let index = state.selectedAnim;
+  if (index === null || index < 0 || index >= list.length || !isPendingAnim(list[index])) {
+    index = list.findIndex((entry) => isPendingAnim(entry));
+  }
+  if (index < 0) return false;
+  const slot = normalizeAnim(list[index]);
+  slot.file = path;
+  list[index] = slot;
+  state.selectedAnim = index;
+  state.note = "Animation snapped into the region";
+  changed();
+  return true;
+}
+
 function toggleSceneAnim(path, on) {
   const list = sceneAnims();
   if (on) {
     if (sceneHasAnim(path)) return;
+    if (fillAnimSlot(path)) return;
     list.push(normalizeAnim(path));
     state.selectedAnim = list.length - 1;
   } else {
@@ -3035,10 +3389,101 @@ function muteVideo(video) {
   video.setAttribute("playsinline", "");
 }
 
+function selectAnim(index) {
+  if (state.selectedAnim === index && state.selectedOverlay === null) return;
+  state.selectedAnim = index;
+  state.selectedOverlay = null;
+  render();
+}
+
+function animCanDrag(entry) {
+  return state.pictureExpanded && !entry?.locked;
+}
+
+function animChrome(index, entry) {
+  const selected = state.selectedAnim === index;
+  const locked = !!entry.locked;
+  const canDrag = animCanDrag(entry);
+  return [
+    selected &&
+      h(
+        "button",
+        {
+          class: "anim-copy",
+          type: "button",
+          title: locked
+            ? "Copy still again (already locked)"
+            : "Copy still for Jim — locks position",
+          onClick: (event) => {
+            event.stopPropagation();
+            exportAnimRegionStill(index);
+          },
+        },
+        downloadIcon()
+      ),
+    selected && h("div", { class: "anim-mark", "aria-hidden": "true" }),
+    selected &&
+      h("button", {
+        class: "anim-remove",
+        type: "button",
+        title: "Remove",
+        text: "×",
+        onClick: (event) => {
+          event.stopPropagation();
+          sceneAnims().splice(index, 1);
+          state.selectedAnim = null;
+          changed();
+        },
+      }),
+    selected &&
+      canDrag &&
+      h("div", {
+        class: "anim-handle",
+        title: "Resize",
+        onPointerdown: (event) => beginAnimResize(event, index),
+      }),
+  ];
+}
+
+function animLayerPointer(event, index, entry) {
+  if (event.target.closest(".anim-handle, .anim-remove, .anim-copy, .anim-mark")) return;
+  if (!animCanDrag(entry)) {
+    event.stopPropagation();
+    selectAnim(index);
+    return;
+  }
+  beginAnimMove(event, index);
+}
+
 function animLayer(entry, index) {
   const normalized = normalizeAnim(entry);
   sceneAnims()[index] = normalized;
   const selected = state.selectedAnim === index;
+  const pending = !normalized.file;
+  const locked = !!normalized.locked;
+
+  const canDrag = animCanDrag(normalized);
+  if (pending) {
+    return h(
+      "div",
+      {
+        class: `anim-layer is-pending${selected ? " selected" : ""}${
+          locked ? " is-locked" : ""
+        }${canDrag ? " can-drag" : ""}`,
+        style: animLayerStyle(normalized),
+        title: locked
+          ? "Locked — click to select"
+          : canDrag
+            ? "Drag to move, or Copy still to lock"
+            : "Expand the picture to drag or resize",
+        onPointerdown: (event) => animLayerPointer(event, index, normalized),
+      },
+      h("div", { class: "anim-pending-fill", "aria-hidden": "true" }),
+      h("span", { class: "anim-pending-label", text: locked ? "Locked" : "Slot" }),
+      ...animChrome(index, normalized)
+    );
+  }
+
   const rate = Math.min(4, Math.max(0.1, (normalized.speed ?? 100) / 100));
   const soft = normalized.soft_edges ? " soft-edges" : "";
   const look = animCssFilter(normalized);
@@ -3079,43 +3524,24 @@ function animLayer(entry, index) {
   const layer = h(
     "div",
     {
-      class: `anim-layer aspect-${normalized.aspect || "native"}${selected ? " selected" : ""}`,
-      style: {
-        left: `${normalized.x * 100}%`,
-        top: `${normalized.y * 100}%`,
-        width: `${normalized.w * 100}%`,
-        aspectRatio: animAspectCss(normalized),
-      },
-      onPointerdown: (event) => {
-        if (event.target.closest(".anim-handle, .anim-remove, .anim-mark")) return;
-        beginAnimMove(event, index);
-      },
+      class: `anim-layer aspect-${normalized.aspect || "native"}${selected ? " selected" : ""}${
+        locked ? " is-locked" : ""
+      }${canDrag ? " can-drag" : ""}`,
+      style: animLayerStyle(normalized),
+      title: locked
+        ? "Locked — click to select"
+        : canDrag
+          ? "Drag to move"
+          : "Expand the picture to drag or resize",
+      onPointerdown: (event) => animLayerPointer(event, index, normalized),
     },
     frontWrap,
     backWrap,
-    selected && h("div", { class: "anim-mark", "aria-hidden": "true" }),
-    selected &&
-      h("button", {
-        class: "anim-remove",
-        type: "button",
-        title: "Remove",
-        text: "×",
-        onClick: (event) => {
-          event.stopPropagation();
-          sceneAnims().splice(index, 1);
-          state.selectedAnim = null;
-          changed();
-        },
-      }),
-    selected &&
-      h("div", {
-        class: "anim-handle",
-        title: "Resize",
-        onPointerdown: (event) => beginAnimResize(event, index),
-      })
+    ...animChrome(index, normalized)
   );
 
   const applyNativeAspect = () => {
+    if (Number.isFinite(normalized.h) && normalized.h > 0) return;
     if ((normalized.aspect || "native") !== "native") return;
     if (!primary.videoWidth || !primary.videoHeight) return;
     layer.style.aspectRatio = animAspectCss(normalized, primary);
@@ -3158,6 +3584,37 @@ function animControlsDial() {
   if (state.selectedAnim >= list.length) return null;
   const entry = normalizeAnim(list[state.selectedAnim]);
   list[state.selectedAnim] = entry;
+  if (!entry.file) {
+    const aspect = entry.aspect === "portrait" ? "portrait" : "landscape";
+    const index = state.selectedAnim;
+    return h(
+      "div",
+      { class: "anim-dials pending-hint" },
+      !entry.locked &&
+        regionAspectToggle(aspect, (next) => {
+          applyAnimAspect(entry, next);
+          state.regionAspect = next;
+          changed();
+        }),
+      h("button", {
+        class: "btn primary",
+        type: "button",
+        text: entry.locked ? "Copy again" : "Copy still",
+        title: entry.locked
+          ? "Copy the still again (slot stays locked)"
+          : "Download and copy for Jim — locks this slot",
+        onClick: () => exportAnimRegionStill(index),
+      }),
+      h("span", {
+        class: "meta",
+        text: entry.locked
+          ? "Locked. Upload/add an animation while this slot is selected — it snaps here."
+          : state.pictureExpanded
+            ? "Drag or resize here, then Copy still to lock. Next animation you add fills this slot."
+            : "Expand the picture to drag or resize, then Copy still to lock.",
+      })
+    );
+  }
   const index = state.selectedAnim;
 
   const setAspect = (next) => {
@@ -3526,10 +3983,13 @@ function beginAnimMove(event, index) {
   const layer = event.currentTarget;
   const entry = normalizeAnim(sceneAnims()[index]);
   sceneAnims()[index] = entry;
+  if (!animCanDrag(entry)) {
+    selectAnim(index);
+    return;
+  }
   if (state.selectedAnim !== index || state.selectedOverlay !== null) {
     state.selectedAnim = index;
     state.selectedOverlay = null;
-    // Keep drag going on this node; selection chrome updates on next render after release if needed.
     layer.classList.add("selected");
   }
   const box = picture.getBoundingClientRect();
@@ -3566,14 +4026,22 @@ function beginAnimResize(event, index) {
   const picture = layer.closest(".picture");
   const entry = normalizeAnim(sceneAnims()[index]);
   sceneAnims()[index] = entry;
+  if (!animCanDrag(entry)) return;
   const box = picture.getBoundingClientRect();
   const startX = event.clientX;
   const originW = entry.w;
+  const originH = entry.h;
+  const keepRatio = Number.isFinite(originH) && originH > 0 && originW > 0;
 
   handle.setPointerCapture(event.pointerId);
   const move = (moveEvent) => {
     entry.w = Math.min(1 - entry.x, Math.max(0.08, originW + (moveEvent.clientX - startX) / box.width));
     layer.style.width = `${entry.w * 100}%`;
+    if (keepRatio) {
+      entry.h = Math.min(1 - entry.y, Math.max(0.04, originH * (entry.w / originW)));
+      layer.style.height = `${entry.h * 100}%`;
+      layer.style.aspectRatio = "auto";
+    }
   };
   const up = () => {
     handle.releasePointerCapture(event.pointerId);
@@ -3891,8 +4359,15 @@ window.addEventListener("keydown", (event) => {
       render();
       return;
     }
+    if (state.regionTool) {
+      state.regionTool = false;
+      state.note = "";
+      render();
+      return;
+    }
     if (state.pictureExpanded) {
       state.pictureExpanded = false;
+      state.regionTool = false;
       render();
       return;
     }

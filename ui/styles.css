@@ -1259,10 +1259,8 @@ button {
 }
 
 .picture-expand,
-.picture-download {
-  position: absolute;
-  top: 10px;
-  z-index: 5;
+.picture-download,
+.picture-region {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1272,24 +1270,77 @@ button {
   color: var(--muted);
   cursor: pointer;
   padding: 0;
+  width: 28px;
+  height: 28px;
+}
+
+.picture-expand,
+.picture-download {
+  position: absolute;
+  top: 10px;
+  z-index: 5;
 }
 
 .picture-expand {
   right: 10px;
-  width: 28px;
-  height: 28px;
 }
 
 .picture-download {
   left: 10px;
-  width: 28px;
-  height: 28px;
+}
+
+.picture-region-tools {
+  position: absolute;
+  top: 10px;
+  left: 46px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .picture-expand:hover,
-.picture-download:hover {
+.picture-download:hover,
+.picture-region:hover,
+.picture-region.on {
   color: var(--ink);
   background: #fff;
+}
+
+.picture-region.on {
+  color: var(--link);
+  box-shadow: 0 0 0 1px rgba(35, 131, 226, 0.35);
+}
+
+.region-aspect {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.region-aspect-btn {
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px 7px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.region-aspect-btn:hover {
+  color: var(--ink);
+}
+
+.region-aspect-btn.on {
+  background: var(--link);
+  color: #fff;
 }
 
 .picture {
@@ -1320,6 +1371,7 @@ button {
 }
 
 .shell.is-expanded .stage {
+  position: relative;
   max-width: none;
   margin: 0;
   padding: 20px;
@@ -1365,6 +1417,36 @@ button {
 .shell.is-expanded .picture-download {
   top: 14px;
   left: 14px;
+}
+
+.shell.is-expanded .picture-region-tools {
+  top: 14px;
+  left: 50px;
+}
+
+.shell.is-expanded .region-aspect {
+  background: rgba(255, 255, 255, 0.95);
+}
+
+.picture.region-mode {
+  cursor: crosshair;
+}
+
+.region-capture {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.region-marquee {
+  position: absolute;
+  z-index: 9;
+  border: 1.5px solid rgba(255, 255, 255, 0.95);
+  background: rgba(35, 131, 226, 0.18);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
 }
 
 .picture.blank {
@@ -1662,20 +1744,135 @@ button {
   border: none;
 }
 
-.shell.is-expanded .stage > .anim-dials {
+.shell.is-expanded .stage > .anim-dials:not(.pending-hint) {
   display: none;
+}
+
+.shell.is-expanded .stage > .anim-dials.pending-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  z-index: 45;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(20, 18, 16, 0.82);
+  color: #fff;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+
+.shell.is-expanded .stage > .anim-dials.pending-hint .meta {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.anim-dials.pending-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
 }
 
 .anim-layer {
   position: absolute;
   z-index: 3;
-  cursor: grab;
+  cursor: pointer;
   touch-action: none;
   user-select: none;
 }
 
-.anim-layer.selected {
+.anim-layer.can-drag {
+  cursor: grab;
+}
+
+.anim-layer.can-drag.selected {
   cursor: grabbing;
+}
+
+.anim-layer.is-locked,
+.anim-layer.is-locked.selected {
+  cursor: pointer;
+}
+
+.anim-lock-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.shell.is-expanded .stage > .anim-lock-note {
+  display: none;
+}
+
+.anim-handle {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--cta);
+  border: 1.5px solid #fff;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.anim-layer.is-pending {
+  border: 1.5px dashed rgba(255, 255, 255, 0.9);
+  background: rgba(35, 131, 226, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+.anim-layer.is-pending.selected {
+  border-color: #fff;
+  background: rgba(35, 131, 226, 0.28);
+}
+
+.anim-pending-fill {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.anim-pending-label {
+  position: absolute;
+  left: 6px;
+  bottom: 5px;
+  z-index: 2;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(20, 18, 16, 0.72);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+.anim-copy {
+  position: absolute;
+  top: -8px;
+  left: -8px;
+  z-index: 3;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--ink);
+  cursor: pointer;
+  padding: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+.anim-copy:hover {
+  background: #fff;
 }
 
 .anim-mark {
@@ -1738,19 +1935,6 @@ button {
   color: var(--ink);
   font: inherit;
   font-size: 13px;
-}
-
-.anim-handle {
-  position: absolute;
-  right: -5px;
-  bottom: -5px;
-  width: 12px;
-  height: 12px;
-  border-radius: 2px;
-  background: var(--cta);
-  border: 1.5px solid #fff;
-  cursor: nwse-resize;
-  touch-action: none;
 }
 
 .anim-remove {
