@@ -33,17 +33,70 @@ const state = {
   pruneAnims: false,
   renamingPath: null,
   pictureExpanded: false,
+  imagePickerOpen: false, // on-picture image dropdown next to expand
   regionTool: false, // draw a still or animation slot
   regionKind: "animation", // "animation" | "still"
   regionAspect: "landscape", // landscape = 16:9, portrait = 9:16
+  shortCut: null, // { open, cx, duration, pendingDownload } — 9:16 scene snip
+  landingMuted: true, // landing hero starts muted for autoplay; speaker toggles
   detailsDirty: false,
   detailsOpen: false,
   sceneDetailsOpen: false,
   transitionSettingsOpen: false,
+  /** AI still generation on the scene page */
+  sceneGen: {
+    revealed: false, // show composed OpenAI prompt (disabled field)
+    videoPromptOpen: false, // toggle for episode/video prompt above scene describe
+    status: "idle", // idle | generating | error
+    error: "",
+  },
+  /** Inline still edit: crop → Claude → ChatGPT image edit */
+  stillGen: {
+    change: "",
+    jarToClaude: "", // Wonderjar → Claude instruction
+    status: "idle", // idle | prompting | imaging | error
+    editPrompt: "", // Claude → ChatGPT prompt
+    useClaude: true,
+    promptDone: false,
+    imageDone: false,
+    error: "",
+    editIndex: null,
+    collapsed: false,
+    panelX: null, // dragged panel position (px)
+    panelY: null,
+  },
+  /** Inline anim: crop → Claude → Veo */
+  animGen: {
+    change: "",
+    jarToClaude: "", // Wonderjar → Claude (Veo) instruction
+    status: "idle", // idle | prompting | imaging | error
+    veoPrompt: "", // Claude → Veo prompt
+    useClaude: true,
+    promptDone: false,
+    imageDone: false,
+    error: "",
+    animIndex: null,
+    collapsed: false,
+    panelX: null,
+    panelY: null,
+  },
+  models: {
+    anthropic: "",
+    openaiImage: "",
+    veo: "",
+  },
+  /** Per-video API cost ledger (estimated) */
+  ledger: {
+    open: false,
+    loading: false,
+    total: 0,
+    entries: [],
+    error: "",
+  },
   libraryShowAll: {
     effects: false,
     animations: false,
-    images: false,
+    images: true, // images live in their own left rail — browse full library by default
     music: false,
     sounds: false,
   },
@@ -139,6 +192,25 @@ function plusIcon() {
   );
 }
 
+function pictureIcon() {
+  return h(
+    "svg",
+    {
+      class: "icon",
+      viewBox: "0 0 16 16",
+      width: "14",
+      height: "14",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.4",
+      "aria-hidden": true,
+    },
+    h("rect", { x: "2.5", y: "3.5", width: "11", height: "9", rx: "1.2" }),
+    h("circle", { cx: "5.75", cy: "6.5", r: "1" }),
+    h("path", { d: "M2.8 11.2 6.2 8.3l2.2 2.1 1.5-1.4 3.2 2.2" })
+  );
+}
+
 function gripIcon() {
   return h(
     "span",
@@ -223,7 +295,11 @@ async function applyRoute() {
   state.selectedOverlay = null;
   state.pictureExpanded = false;
   state.regionTool = false;
+  state.shortCut = null;
   overlayUi = null;
+  if (!state.models?.anthropic || !state.models?.openaiImage) {
+    await loadModels();
+  }
 
   if (route.page === "landing") {
     state.videoId = null;
@@ -1406,6 +1482,659 @@ async function exportEditRegionStill(index, { clipboard = true } = {}) {
   if (await exportRegionStill(entry, { clipboard, label: "edit" })) changed();
 }
 
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(new Error("Could not read crop"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function cropSceneRegion(entry) {
+  const imagePath = editOwnerScene()?.image || scene()?.image;
+  if (!imagePath || !imageExists(imagePath)) {
+    throw new Error("No scene image to crop");
+  }
+  const image = await loadImageElement(`/${imagePath}`);
+  const box = regionCropNorm(entry);
+  const sx = Math.round(box.x * image.naturalWidth);
+  const sy = Math.round(box.y * image.naturalHeight);
+  const sw = Math.max(1, Math.round(box.w * image.naturalWidth));
+  const sh = Math.max(1, Math.round(box.h * image.naturalHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = sw;
+  canvas.height = sh;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(image, sx, sy, sw, sh, 0, 0, sw, sh);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!blob) throw new Error("Could not export crop");
+  const image_b64 = await blobToBase64(blob);
+  const portrait = entry.aspect === "portrait" || sh > sw;
+  return {
+    image_b64,
+    media_type: "image/png",
+    size: portrait ? "1024x1536" : "1536x1024",
+    aspect_ratio: portrait ? "9:16" : "16:9",
+  };
+}
+
+async function cropEditRegion(entry) {
+  return cropSceneRegion(entry);
+}
+
+async function cropAnimRegion(entry) {
+  return cropSceneRegion(entry);
+}
+
+const JAR_TO_CLAUDE_PREFIX =
+  "Give me a ChatGPT prompt to basically give this exact same image, except ";
+
+function composeJarToClaude(change = "") {
+  const bit = String(change || "").trim();
+  return JAR_TO_CLAUDE_PREFIX + (bit || "…");
+}
+
+const DEFAULT_JAR_TO_CLAUDE = composeJarToClaude("");
+
+const DEFAULT_JAR_TO_CLAUDE_VEO = `VEO ANIMATION PROMPTS
+
+Structure every animation prompt like this:
+
+Static locked-off camera on [scene: what it is, what's in frame, time of day]. Only [the one thing that moves] moves. [Describe that motion mechanically: direction, rhythm, behavior, speed. Give it a vector and obstacles, not adjectives.] [Bound it: what it must not become. No whitewater. Never fully extinguishing. Stays the same size.] As [the light source] shifts, [one or two nearby specular surfaces: brass, glass, wet stone, water] catch highlights that move and break with it, and the glow rises and falls across [the nearest one or two diffuse surfaces]. The falloff is short: surfaces beyond that hold constant brightness. Everything else in the frame is completely frozen: [exhaustive list by name: buildings, figures, signage, text, numbered markers, trees, props, anything adjacent to the moving region] remain perfectly still and unchanged. Nothing [in the region / on the surface] moves except [the thing] itself. No camera movement, no zoom, no pan, no parallax, no focus pull. Photoreal tilt-shift miniature diorama, [angle] preserved, shallow depth of field preserved, [palette], film grain retained.
+
+Additional rules:
+
+- One mover only. Everything else is frozen by name.
+- Motion is mechanical: direction, rhythm, speed, obstacles — not mood words.
+- Bound the motion (what it must not become / must not do).
+- Specular highlights and short light falloff only on the nearest surfaces.
+- Never invent camera moves. Locked-off only.
+- Match the crop aspect: 9:16 or 16:9.
+
+Prompt example:
+
+Static locked-off camera on [scene: what it is, what's in frame, time of day]. Only [the one thing that moves] moves. [Describe that motion mechanically: direction, rhythm, behavior, speed. Give it a vector and obstacles, not adjectives.] [Bound it: what it must not become. No whitewater. Never fully extinguishing. Stays the same size.] As [the light source] shifts, [one or two nearby specular surfaces: brass, glass, wet stone, water] catch highlights that move and break with it, and the glow rises and falls across [the nearest one or two diffuse surfaces]. The falloff is short: surfaces beyond that hold constant brightness. Everything else in the frame is completely frozen: [exhaustive list by name: buildings, figures, signage, text, numbered markers, trees, props, anything adjacent to the moving region] remain perfectly still and unchanged. Nothing [in the region / on the surface] moves except [the thing] itself. No camera movement, no zoom, no pan, no parallax, no focus pull. Photoreal tilt-shift miniature diorama, [angle] preserved, shallow depth of field preserved, [palette], film grain retained.`
+
+function resetStillGen(partial = {}) {
+  const prev = state.stillGen || {};
+  state.stillGen = {
+    change: "",
+    jarToClaude: DEFAULT_JAR_TO_CLAUDE,
+    status: "idle",
+    editPrompt: "",
+    useClaude: prev.useClaude !== false,
+    promptDone: false,
+    imageDone: false,
+    error: "",
+    editIndex: null,
+    collapsed: prev.collapsed ?? false,
+    panelX: prev.panelX ?? null,
+    panelY: prev.panelY ?? null,
+    ...partial,
+  };
+}
+
+function stillGenStep(label, { active = false, done = false } = {}) {
+  return h(
+    "div",
+    {
+      class: `still-gen-step${active ? " is-active" : ""}${done ? " is-done" : ""}`,
+      "aria-current": active ? "step" : "false",
+    },
+    h("span", {
+      class: "still-gen-step-mark",
+      "aria-hidden": true,
+      text: done ? "✓" : active ? "…" : "○",
+    }),
+    h("span", {
+      class: "still-gen-step-label",
+      text: active ? `${label}…` : label,
+    })
+  );
+}
+
+function stillGenFieldLabel(text, model = "") {
+  return h(
+    "div",
+    { class: "still-gen-label-row" },
+    h("span", { class: "still-gen-label muted", text }),
+    model && h("span", { class: "still-gen-model", text: model, title: model })
+  );
+}
+
+function beginEditPanelDrag(event, kind = "still") {
+  const panel = event.currentTarget.closest(".edit-dials");
+  if (!panel || !state.pictureExpanded) return;
+  if (event.button != null && event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const rect = panel.getBoundingClientRect();
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const originLeft = rect.left;
+  const originTop = rect.top;
+  panel.classList.add("is-moved", "is-dragging");
+  panel.style.left = `${originLeft}px`;
+  panel.style.top = `${originTop}px`;
+  panel.style.right = "auto";
+  panel.style.bottom = "auto";
+  panel.style.transform = "none";
+
+  const move = (moveEvent) => {
+    const left = Math.max(8, originLeft + (moveEvent.clientX - startX));
+    const top = Math.max(8, originTop + (moveEvent.clientY - startY));
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+  };
+  const up = () => {
+    panel.releasePointerCapture?.(event.pointerId);
+    panel.removeEventListener("pointermove", move);
+    panel.removeEventListener("pointerup", up);
+    panel.removeEventListener("pointercancel", up);
+    panel.classList.remove("is-dragging");
+    const left = parseFloat(panel.style.left) || originLeft;
+    const top = parseFloat(panel.style.top) || originTop;
+    if (kind === "anim") {
+      state.animGen = { ...(state.animGen || {}), panelX: left, panelY: top };
+    } else {
+      state.stillGen = { ...(state.stillGen || {}), panelX: left, panelY: top };
+    }
+  };
+  panel.setPointerCapture?.(event.pointerId);
+  panel.addEventListener("pointermove", move);
+  panel.addEventListener("pointerup", up);
+  panel.addEventListener("pointercancel", up);
+}
+
+function beginStillPanelDrag(event) {
+  beginEditPanelDrag(event, "still");
+}
+
+function beginAnimPanelDrag(event) {
+  beginEditPanelDrag(event, "anim");
+}
+
+function resetAnimGen(partial = {}) {
+  const prev = state.animGen || {};
+  state.animGen = {
+    change: "",
+    jarToClaude: DEFAULT_JAR_TO_CLAUDE_VEO,
+    status: "idle",
+    veoPrompt: "",
+    useClaude: prev.useClaude !== false,
+    promptDone: false,
+    imageDone: false,
+    error: "",
+    animIndex: null,
+    collapsed: prev.collapsed ?? false,
+    panelX: prev.panelX ?? null,
+    panelY: prev.panelY ?? null,
+    ...partial,
+  };
+}
+
+function stillGenStatusBar({
+  useClaude,
+  onToggleClaude,
+  busy = false,
+  prompting = false,
+  imaging = false,
+  promptDone = false,
+  imageDone = false,
+  claudeLabel = "Send to Claude",
+  promptLabel = "Generate edit prompt",
+  imageLabel = "Generate new image",
+} = {}) {
+  const promptSkipped = !useClaude && (imaging || imageDone || promptDone);
+  return h(
+    "div",
+    { class: "still-gen-status-bar" },
+    h(
+      "label",
+      {
+        class: `anim-check still-gen-claude-toggle${useClaude ? " on" : ""}`,
+        title: useClaude
+          ? "On: Claude writes the model prompt from your change"
+          : "Off: paste a prompt below and send it straight to the model",
+      },
+      h("input", {
+        type: "checkbox",
+        checked: useClaude,
+        disabled: busy,
+        onChange: onToggleClaude,
+      }),
+      h("span", { text: claudeLabel })
+    ),
+    h(
+      "div",
+      { class: "still-gen-steps", "aria-label": "Generation progress" },
+      stillGenStep(promptLabel, {
+        active: prompting,
+        done: promptDone || promptSkipped,
+      }),
+      stillGenStep(imageLabel, {
+        active: imaging,
+        done: imageDone,
+      })
+    )
+  );
+}
+
+async function runAnimGenerate(index) {
+  const list = sceneAnims();
+  if (index == null || index < 0 || index >= list.length) return;
+  const entry = normalizeAnim(list[index]);
+  list[index] = entry;
+  const gen = state.animGen || {};
+  const useClaude = gen.useClaude !== false;
+  const change = String(
+    document.querySelector(".anim-gen-change")?.value || gen.change || ""
+  ).trim();
+  const jarToClaude = String(
+    document.querySelector(".anim-gen-jar")?.value ||
+      gen.jarToClaude ||
+      DEFAULT_JAR_TO_CLAUDE_VEO
+  ).trim();
+  const liveVeoPrompt = String(
+    document.querySelector(".anim-gen-claude")?.value || gen.veoPrompt || ""
+  ).trim();
+  if (state.animGen) {
+    state.animGen.change = change;
+    state.animGen.jarToClaude = jarToClaude || DEFAULT_JAR_TO_CLAUDE_VEO;
+    state.animGen.veoPrompt = liveVeoPrompt;
+  }
+
+  if (!useClaude && !liveVeoPrompt) {
+    resetAnimGen({
+      ...gen,
+      change,
+      jarToClaude: jarToClaude || DEFAULT_JAR_TO_CLAUDE_VEO,
+      veoPrompt: liveVeoPrompt,
+      animIndex: index,
+      useClaude: false,
+      status: "error",
+      error: "Paste a Claude → Veo prompt, or turn Generate Veo prompt on.",
+    });
+    render();
+    return;
+  }
+  if (useClaude && !change) {
+    resetAnimGen({
+      ...gen,
+      change,
+      jarToClaude: jarToClaude || DEFAULT_JAR_TO_CLAUDE_VEO,
+      veoPrompt: liveVeoPrompt,
+      animIndex: index,
+      useClaude: true,
+      status: "error",
+      error: "Say what should move in this region.",
+    });
+    render();
+    return;
+  }
+
+  const stem = `${(scene()?.image ? baseName(scene().image) : "anim") || "anim"}-loop`;
+
+  try {
+    state.animGen = {
+      ...gen,
+      change,
+      jarToClaude: jarToClaude || DEFAULT_JAR_TO_CLAUDE_VEO,
+      veoPrompt: liveVeoPrompt,
+      animIndex: index,
+      useClaude,
+      status: useClaude ? "prompting" : "imaging",
+      promptDone: !useClaude,
+      imageDone: false,
+      error: "",
+    };
+    render();
+
+    const crop = await cropAnimRegion(entry);
+
+    if (!useClaude) {
+      await runAnimVideoFromPrompt(index, {
+        veoPrompt: liveVeoPrompt,
+        stem,
+        crop,
+      });
+      return;
+    }
+
+    const promptRes = await fetch("/api/generate-anim", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        step: "prompt",
+        change,
+        jar_to_claude: jarToClaude || DEFAULT_JAR_TO_CLAUDE_VEO,
+        image_b64: crop.image_b64,
+        media_type: crop.media_type,
+        video: state.videoId,
+      }),
+    });
+    const promptData = await promptRes.json().catch(() => ({}));
+    if (!promptRes.ok) throw new Error(promptData.error || "Claude Veo prompt failed");
+    const veoPrompt = (promptData.veo_prompt || "").trim();
+    if (!veoPrompt) throw new Error("Claude returned an empty Veo prompt");
+
+    state.animGen = {
+      ...state.animGen,
+      veoPrompt,
+      promptDone: true,
+      status: "imaging",
+    };
+    render();
+
+    await runAnimVideoFromPrompt(index, { veoPrompt, stem, crop });
+  } catch (error) {
+    state.animGen = {
+      ...state.animGen,
+      animIndex: index,
+      status: "error",
+      error: error.message || "Animation generate failed",
+    };
+    state.note = state.animGen.error;
+    render();
+  }
+}
+
+async function runAnimVideoFromPrompt(index, { veoPrompt = "", stem = "", crop = null } = {}) {
+  const list = sceneAnims();
+  if (index == null || index < 0 || index >= list.length) return;
+  const entry = normalizeAnim(list[index]);
+  list[index] = entry;
+  // Prefer an explicit prompt arg; empty DOM values must not wipe a pasted prompt.
+  const livePrompt = String(
+    veoPrompt ||
+      document.querySelector(".anim-gen-claude")?.value ||
+      state.animGen?.veoPrompt ||
+      ""
+  ).trim();
+  if (!livePrompt) {
+    state.animGen = {
+      ...(state.animGen || {}),
+      animIndex: index,
+      status: "error",
+      error: "Claude → Veo prompt is empty.",
+    };
+    render();
+    return;
+  }
+  const name =
+    stem || `${(scene()?.image ? baseName(scene().image) : "anim") || "anim"}-loop`;
+  const region = crop || (await cropAnimRegion(entry));
+
+  state.animGen = {
+    ...(state.animGen || {}),
+    animIndex: index,
+    veoPrompt: livePrompt,
+    promptDone: true,
+    imageDone: false,
+    status: "imaging",
+    error: "",
+  };
+  render();
+
+  try {
+    const videoRes = await fetch("/api/generate-anim", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        step: "video",
+        veo_prompt: livePrompt,
+        image_b64: region.image_b64,
+        media_type: region.media_type,
+        aspect_ratio: region.aspect_ratio,
+        name,
+        video: state.videoId,
+      }),
+    });
+    const videoData = await videoRes.json().catch(() => ({}));
+    if (!videoRes.ok) throw new Error(videoData.error || "Veo generation failed");
+    await refreshOutputs();
+    state.selectedAnim = index;
+    if (!fillAnimSlot(videoData.path, { replace: true })) {
+      throw new Error("Generated, but could not place the animation");
+    }
+    state.animGen = {
+      ...state.animGen,
+      veoPrompt: livePrompt,
+      imageDone: true,
+      status: "idle",
+      error: "",
+    };
+    state.note = "Animation updated";
+    refreshLedger({ silent: true });
+    changed();
+  } catch (error) {
+    state.animGen = {
+      ...state.animGen,
+      animIndex: index,
+      status: "error",
+      error: error.message || "Veo generation failed",
+    };
+    state.note = state.animGen.error;
+    render();
+  }
+}
+
+async function runStillEditGenerate(index) {
+  const list = sceneEdits();
+  if (index == null || index < 0 || index >= list.length) return;
+  const entry = normalizeEdit(list[index]);
+  list[index] = entry;
+  const gen = state.stillGen || {};
+  const useClaude = gen.useClaude !== false;
+  const change = String(
+    document.querySelector(".still-gen-change")?.value ?? gen.change ?? ""
+  ).trim();
+  const jarToClaude = String(
+    document.querySelector(".still-gen-jar")?.value ?? gen.jarToClaude ?? DEFAULT_JAR_TO_CLAUDE
+  ).trim();
+  const liveEditPrompt = String(
+    document.querySelector(".still-gen-claude")?.value ?? gen.editPrompt ?? ""
+  ).trim();
+  if (state.stillGen) {
+    state.stillGen.change = change;
+    state.stillGen.jarToClaude = jarToClaude || DEFAULT_JAR_TO_CLAUDE;
+    state.stillGen.editPrompt = liveEditPrompt;
+  }
+
+  const owner = editOwnerScene();
+  const stem = `${(owner?.image ? baseName(owner.image) : "edit") || "edit"}-edit`;
+
+  try {
+    const crop = await cropEditRegion(entry);
+
+    if (!useClaude) {
+      if (!liveEditPrompt) {
+        resetStillGen({
+          ...gen,
+          change,
+          jarToClaude: jarToClaude || DEFAULT_JAR_TO_CLAUDE,
+          editPrompt: liveEditPrompt,
+          editIndex: index,
+          status: "error",
+          error: "Paste a Claude → ChatGPT prompt, or turn Send to Claude on.",
+        });
+        render();
+        return;
+      }
+      state.stillGen = {
+        ...gen,
+        change,
+        jarToClaude: jarToClaude || DEFAULT_JAR_TO_CLAUDE,
+        editPrompt: liveEditPrompt,
+        editIndex: index,
+        useClaude: false,
+        promptDone: true,
+        imageDone: false,
+        status: "imaging",
+        error: "",
+      };
+      render();
+      await runStillImageFromPrompt(index, {
+        editPrompt: liveEditPrompt,
+        stem,
+        crop,
+      });
+      return;
+    }
+
+    if (!change) {
+      resetStillGen({
+        ...gen,
+        jarToClaude: jarToClaude || DEFAULT_JAR_TO_CLAUDE,
+        editPrompt: liveEditPrompt,
+        editIndex: index,
+        status: "error",
+        error: "Say what you’d like to change.",
+      });
+      render();
+      return;
+    }
+
+    state.stillGen = {
+      ...gen,
+      change,
+      jarToClaude: jarToClaude || DEFAULT_JAR_TO_CLAUDE,
+      editPrompt: liveEditPrompt,
+      editIndex: index,
+      useClaude: true,
+      status: "prompting",
+      promptDone: false,
+      imageDone: false,
+      error: "",
+    };
+    render();
+    const promptRes = await fetch("/api/edit-still", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        step: "prompt",
+        change,
+        jar_to_claude: jarToClaude || DEFAULT_JAR_TO_CLAUDE,
+        image_b64: crop.image_b64,
+        media_type: crop.media_type,
+        video: state.videoId,
+      }),
+    });
+    const promptData = await promptRes.json().catch(() => ({}));
+    if (!promptRes.ok) throw new Error(promptData.error || "Claude edit prompt failed");
+    const editPrompt = (promptData.edit_prompt || "").trim();
+    if (!editPrompt) throw new Error("Claude returned an empty edit prompt");
+
+    state.stillGen = {
+      ...state.stillGen,
+      editPrompt,
+      promptDone: true,
+      status: "imaging",
+    };
+    render();
+
+    await runStillImageFromPrompt(index, {
+      editPrompt,
+      stem,
+      crop,
+    });
+  } catch (error) {
+    state.stillGen = {
+      ...state.stillGen,
+      editIndex: index,
+      status: "error",
+      error: error.message || "Still edit failed",
+    };
+    state.note = state.stillGen.error;
+    render();
+  }
+}
+
+async function runStillImageFromPrompt(index, { editPrompt = "", stem = "", crop = null } = {}) {
+  const list = sceneEdits();
+  if (index == null || index < 0 || index >= list.length) return;
+  const entry = normalizeEdit(list[index]);
+  list[index] = entry;
+  const livePrompt = String(
+    document.querySelector(".still-gen-claude")?.value ?? editPrompt ?? state.stillGen?.editPrompt ?? ""
+  ).trim();
+  if (!livePrompt) {
+    state.stillGen = {
+      ...(state.stillGen || {}),
+      editIndex: index,
+      status: "error",
+      error: "Claude → ChatGPT prompt is empty.",
+    };
+    render();
+    return;
+  }
+  const owner = editOwnerScene();
+  const name =
+    stem || `${(owner?.image ? baseName(owner.image) : "edit") || "edit"}-edit`;
+  const region = crop || (await cropEditRegion(entry));
+
+  state.stillGen = {
+    ...(state.stillGen || {}),
+    editIndex: index,
+    editPrompt: livePrompt,
+    promptDone: true,
+    imageDone: false,
+    status: "imaging",
+    error: "",
+  };
+  render();
+
+  try {
+    const imageRes = await fetch("/api/edit-still", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        step: "image",
+        edit_prompt: livePrompt,
+        image_b64: region.image_b64,
+        media_type: region.media_type,
+        name,
+        size: region.size,
+        video: state.videoId,
+      }),
+    });
+    const imageData = await imageRes.json().catch(() => ({}));
+    if (!imageRes.ok) throw new Error(imageData.error || "Image generation failed");
+    await refreshOutputs();
+    state.selectedEdit = index;
+    if (!fillEditSlot(imageData.path, { replace: true })) {
+      throw new Error("Generated, but could not place the still");
+    }
+    const placed = normalizeEdit(sceneEdits()[index]);
+    placed.locked = true;
+    sceneEdits()[index] = placed;
+    state.stillGen = {
+      ...state.stillGen,
+      editPrompt: livePrompt,
+      imageDone: true,
+      status: "idle",
+      error: "",
+    };
+    state.note = "Still updated";
+    refreshLedger({ silent: true });
+    changed();
+  } catch (error) {
+    state.stillGen = {
+      ...state.stillGen,
+      editIndex: index,
+      status: "error",
+      error: error.message || "Image generation failed",
+    };
+    state.note = state.stillGen.error;
+    render();
+  }
+}
+
 function filledSceneEdits(index = state.sceneIndex) {
   return sceneEdits(index)
     .map((entry) => normalizeEdit(entry))
@@ -1767,8 +2496,18 @@ function beginRegionDraw(event) {
       );
       state.selectedEdit = list.length - 1;
       state.selectedAnim = null;
-      state.note =
-        "Still region saved — Copy still, adjust, then paste or upload to fill it.";
+      state.stillGen = {
+        ...(state.stillGen || {}),
+        change: "",
+        jarToClaude: DEFAULT_JAR_TO_CLAUDE,
+        status: "idle",
+        editPrompt: "",
+        promptDone: false,
+        imageDone: false,
+        error: "",
+        editIndex: list.length - 1,
+      };
+      state.note = "Still region saved — describe what to change below.";
     } else {
       const list = sceneAnims();
       list.push(
@@ -1784,8 +2523,18 @@ function beginRegionDraw(event) {
       );
       state.selectedAnim = list.length - 1;
       state.selectedEdit = null;
-      state.note =
-        "Animation region saved — Copy still for Jim, then add the clip while this slot is selected.";
+      state.animGen = {
+        ...(state.animGen || {}),
+        change: "",
+        jarToClaude: DEFAULT_JAR_TO_CLAUDE_VEO,
+        status: "idle",
+        veoPrompt: "",
+        promptDone: false,
+        imageDone: false,
+        error: "",
+        animIndex: list.length - 1,
+      };
+      state.note = "Animation region saved — describe what should move, then Generate.";
     }
     state.regionTool = false;
     changed();
@@ -2381,6 +3130,7 @@ function paintPlayhead() {
   }
   paintOverlays();
   syncSceneTransitionPreview();
+  paintShortRange();
 }
 
 function windowOpacity(start, showSeconds, at) {
@@ -2588,6 +3338,7 @@ function fullSceneImagePrompt(entry = scene()) {
   ensureCreativeBrief();
   ensureSceneBrief(entry);
   return joinPrompts(
+    state.jar?.prompt,
     state.script.prompt,
     entry.title?.trim() ? `Scene: ${entry.title.trim()}` : "",
     entry.image_prompt
@@ -2713,7 +3464,7 @@ function landingCopy() {
   const landing = state.site?.landing || {};
   return {
     brand: landing.brand || "Wonderjar",
-    title: landing.title || "Build a world worth staying in.",
+    title: landing.title || "Build a world that pulls you in.",
     description: landing.description || "Build it. Light it. Share it.",
     cta: landing.cta || "Enter Riverbend",
     href: landing.href || "/video?v=riverbend",
@@ -2723,6 +3474,167 @@ function landingCopy() {
     video: landing.video || "/assets/videos/landing-loop.mp4",
     poster: landing.poster || "/assets/videos/landing-poster.jpg",
   };
+}
+
+async function loadModels() {
+  try {
+    const data = await (await fetch("/api/config")).json();
+    state.models = {
+      anthropic: data.anthropic_model || "",
+      openaiImage: data.openai_image_model || "",
+      veo: data.veo_model || "",
+    };
+  } catch {
+    /* optional chrome */
+  }
+}
+
+function formatUsd(amount) {
+  const n = Number(amount) || 0;
+  if (n >= 1) return `$${n.toFixed(2)}`;
+  if (n >= 0.01) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(4)}`;
+}
+
+function formatLedgerWhen(ts) {
+  if (!ts) return "";
+  try {
+    const d = new Date(ts.endsWith("Z") ? ts : `${ts}Z`);
+    if (Number.isNaN(d.getTime())) return ts;
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return ts;
+  }
+}
+
+async function refreshLedger({ silent = false } = {}) {
+  if (!state.videoId) return;
+  if (!silent) {
+    state.ledger = { ...state.ledger, loading: true, error: "" };
+    render();
+  }
+  try {
+    const data = await (await fetch(withVideo("/api/ledger"))).json();
+    if (data.error) throw new Error(data.error);
+    state.ledger = {
+      ...state.ledger,
+      loading: false,
+      total: data.total || 0,
+      entries: Array.isArray(data.entries) ? data.entries.slice().reverse() : [],
+      error: "",
+    };
+  } catch (error) {
+    state.ledger = {
+      ...state.ledger,
+      loading: false,
+      error: error.message || "Could not load ledger",
+    };
+  }
+  render();
+}
+
+async function toggleLedgerPanel() {
+  const open = !state.ledger?.open;
+  state.ledger = { ...(state.ledger || {}), open };
+  render();
+  if (open) await refreshLedger();
+}
+
+function ledgerPanel() {
+  const ledger = state.ledger || {};
+  if (!ledger.open) return null;
+  const entries = ledger.entries || [];
+  return h(
+    "div",
+    { class: "ledger-panel", role: "dialog", "aria-label": "API cost ledger" },
+    h(
+      "div",
+      { class: "ledger-panel-head" },
+      h("span", { class: "ledger-panel-title", text: "API spend" }),
+      h("span", {
+        class: "ledger-panel-total",
+        text: ledger.loading ? "…" : formatUsd(ledger.total),
+        title: "Estimated total for this video",
+      }),
+      h(
+        "button",
+        {
+          class: "ledger-panel-close",
+          type: "button",
+          "aria-label": "Close ledger",
+          onClick: () => {
+            state.ledger = { ...state.ledger, open: false };
+            render();
+          },
+          text: "×",
+        }
+      )
+    ),
+    h("p", {
+      class: "ledger-panel-note muted",
+      text: "Estimated from published rates — APIs don’t return dollar amounts.",
+    }),
+    ledger.error && h("p", { class: "ledger-panel-error", text: ledger.error }),
+    h(
+      "div",
+      { class: "ledger-panel-list" },
+      !ledger.loading &&
+        !entries.length &&
+        h("p", { class: "muted", text: "No API calls logged for this video yet." }),
+      ...entries.map((entry) =>
+        h(
+          "div",
+          { class: "ledger-panel-item" },
+          h(
+            "div",
+            { class: "ledger-panel-item-top" },
+            h("span", {
+              class: "ledger-panel-note-text",
+              text: entry.note || "API call",
+            }),
+            h("span", {
+              class: "ledger-panel-cost",
+              text: formatUsd(entry.cost),
+              title: entry.estimated ? "Estimated" : "Reported",
+            })
+          ),
+          h("div", {
+            class: "ledger-panel-item-meta muted",
+            text: [
+              entry.provider,
+              entry.model,
+              formatLedgerWhen(entry.ts),
+            ]
+              .filter(Boolean)
+              .join(" · "),
+          })
+        )
+      )
+    )
+  );
+}
+
+function ledgerButton() {
+  const total = state.ledger?.total;
+  const label =
+    total > 0 ? `$${Number(total).toFixed(total >= 1 ? 2 : 3)}` : "$";
+  return h(
+    "button",
+    {
+      class: `btn ghost icon-btn ledger-btn${state.ledger?.open ? " is-open" : ""}`,
+      type: "button",
+      title: "API cost ledger for this video",
+      "aria-label": "Open API cost ledger",
+      "aria-expanded": state.ledger?.open ? "true" : "false",
+      onClick: () => toggleLedgerPanel(),
+      text: label,
+    }
+  );
 }
 
 async function loadJars() {
@@ -2781,7 +3693,15 @@ async function loadVideo(videoId, jarId = null) {
   state.detailsDirty = false;
   state.detailsOpen = false;
   state.sceneDetailsOpen = false;
+  state.ledger = {
+    open: false,
+    loading: false,
+    total: 0,
+    entries: [],
+    error: "",
+  };
   ensureScript();
+  refreshLedger({ silent: true });
   return true;
 }
 
@@ -3018,6 +3938,20 @@ async function finishProcessJob(status) {
   const panel = state.processPanel;
   if (!panel?.open) {
     // Process Scene / standalone renders still need a UI refresh.
+    if (
+      status === "done" &&
+      state.shortCut?.pendingDownload &&
+      state.render.kind === "scene" &&
+      state.render.scene === state.sceneIndex + 1 &&
+      outputReady(sceneOutput(state.sceneIndex))
+    ) {
+      state.shortCut.pendingDownload = false;
+      downloadShort(state.sceneIndex + 1);
+      return;
+    }
+    if ((status === "error" || status === "idle") && state.shortCut) {
+      state.shortCut.pendingDownload = false;
+    }
     render();
     return;
   }
@@ -3245,6 +4179,261 @@ function downloadOutput(sceneNumber = null) {
   window.location.href = url;
 }
 
+function shortCutOpen() {
+  return !!(state.shortCut && state.shortCut.open);
+}
+
+/** Normalized width of a full-height 9:16 strip on the 3:2 picture. */
+function shortRectWidth() {
+  return regionNormWH("portrait");
+}
+
+function shortRectBox(cx = state.shortCut?.cx ?? 0.5) {
+  const w = shortRectWidth();
+  const x = Math.min(1 - w, Math.max(0, cx - w / 2));
+  return { x, y: 0, w, h: 1, cx: x + w / 2 };
+}
+
+function openShortCut() {
+  if (isTransitionScene()) {
+    state.note = "Pick a picture scene — transitions don't have clips to snip";
+    render();
+    return;
+  }
+  if (!sceneSequence(state.sceneIndex).total) {
+    state.note = "Add a picture (and optional songs) before cutting a short";
+    render();
+    return;
+  }
+  state.pictureExpanded = false;
+  state.regionTool = false;
+  state.selectedAnim = null;
+  state.selectedEdit = null;
+  state.shortCut = {
+    open: true,
+    cx: 0.5,
+    duration: state.shortCut?.duration > 0 ? state.shortCut.duration : 15,
+    pendingDownload: false,
+  };
+  state.note = "Drag the 9:16 frame, scrub the start, set duration, then Download";
+  render();
+}
+
+function closeShortCut() {
+  if (!state.shortCut) return;
+  state.shortCut = null;
+  state.note = "";
+  render();
+}
+
+function downloadShort(sceneNumber = state.sceneIndex + 1) {
+  const cut = state.shortCut;
+  const cx = cut?.cx ?? 0.5;
+  const start = Math.max(0, player.at || 0);
+  const duration = Math.max(0.5, Number(cut?.duration) || 15);
+  const url =
+    `/download-short?v=${encodeURIComponent(state.videoId)}` +
+    `&scene=${encodeURIComponent(sceneNumber)}` +
+    `&cx=${encodeURIComponent(String(cx))}` +
+    `&start=${encodeURIComponent(String(start))}` +
+    `&duration=${encodeURIComponent(String(duration))}`;
+  window.location.href = url;
+  state.note = `Downloading ${duration}s 9:16 short…`;
+  render();
+}
+
+async function confirmShortDownload() {
+  if (!shortCutOpen()) return;
+  const sceneNumber = state.sceneIndex + 1;
+  if (state.render.status === "running" && state.render.video === state.videoId) {
+    state.note = "Wait for the current render to finish";
+    render();
+    return;
+  }
+  if (!outputReady(sceneOutput(state.sceneIndex))) {
+    state.shortCut.pendingDownload = true;
+    state.note = "Processing scene, then downloading short…";
+    render();
+    await generate(sceneNumber);
+    return;
+  }
+  state.shortCut.pendingDownload = false;
+  downloadShort(sceneNumber);
+}
+
+function beginShortRectDrag(event) {
+  if (!shortCutOpen()) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const picture = event.currentTarget.closest(".picture");
+  if (!picture) return;
+  const box = picture.getBoundingClientRect();
+  const w = shortRectWidth();
+  const grabX = (event.clientX - box.left) / box.width;
+  const originCx = state.shortCut.cx;
+  const offset = grabX - originCx;
+  const layer = picture.querySelector(".short-rect");
+  const shadeL = picture.querySelector(".short-shade-left");
+  const shadeR = picture.querySelector(".short-shade-right");
+
+  const paint = (cx) => {
+    const rect = shortRectBox(cx);
+    state.shortCut.cx = rect.cx;
+    if (layer) {
+      layer.style.left = `${rect.x * 100}%`;
+      layer.style.width = `${rect.w * 100}%`;
+    }
+    if (shadeL) shadeL.style.width = `${rect.x * 100}%`;
+    if (shadeR) {
+      shadeR.style.left = `${(rect.x + rect.w) * 100}%`;
+      shadeR.style.width = `${(1 - rect.x - rect.w) * 100}%`;
+    }
+  };
+
+  const surface = event.currentTarget;
+  surface.setPointerCapture(event.pointerId);
+  const move = (moveEvent) => {
+    const x = (moveEvent.clientX - box.left) / box.width;
+    paint(Math.min(1 - w / 2, Math.max(w / 2, x - offset)));
+  };
+  const up = () => {
+    surface.releasePointerCapture(event.pointerId);
+    surface.removeEventListener("pointermove", move);
+    surface.removeEventListener("pointerup", up);
+    surface.removeEventListener("pointercancel", up);
+  };
+  surface.addEventListener("pointermove", move);
+  surface.addEventListener("pointerup", up);
+  surface.addEventListener("pointercancel", up);
+}
+
+function shortRectIcon() {
+  return h(
+    "svg",
+    {
+      class: "icon",
+      viewBox: "0 0 16 16",
+      width: "14",
+      height: "14",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.5",
+      "aria-hidden": true,
+    },
+    h("rect", { x: "5", y: "1.5", width: "6", height: "13", rx: "1" })
+  );
+}
+
+function shortCutPanel() {
+  if (!shortCutOpen()) return null;
+  const total = scenePlayTotal(state.sceneIndex) || 0;
+  const start = Math.min(Math.max(0, player.at || 0), total || 0);
+  const duration = Math.max(0.5, Number(state.shortCut.duration) || 15);
+  const end = total ? Math.min(total, start + duration) : start + duration;
+  const ready = outputReady(sceneOutput(state.sceneIndex));
+  const busy =
+    state.shortCut.pendingDownload ||
+    (state.render.status === "running" && state.render.video === state.videoId);
+  return h(
+    "div",
+    { class: "short-cut-panel" },
+    h("div", { class: "short-cut-title", text: "Cut short" }),
+    h(
+      "div",
+      { class: "short-cut-row" },
+      h("label", { class: "short-cut-field" },
+        h("span", { class: "meta", text: "Start (s)" }),
+        h("input", {
+          class: "short-cut-num short-cut-start",
+          type: "number",
+          min: "0",
+          step: "0.5",
+          value: String(Math.round(start * 10) / 10),
+          title: "Type a start time, or scrub the timeline below",
+          onInput: (event) => {
+            const span = scenePlayTotal(state.sceneIndex) || 0;
+            const next = Math.max(0, Number(event.target.value) || 0);
+            seekTo(span > 0 ? Math.min(span, next) : next);
+            paintShortRange();
+          },
+        })
+      ),
+      h("label", { class: "short-cut-field" },
+        h("span", { class: "meta", text: "Duration (s)" }),
+        h("input", {
+          class: "short-cut-num short-cut-duration",
+          type: "number",
+          min: "0.5",
+          step: "0.5",
+          value: String(duration),
+          onInput: (event) => {
+            const next = Math.max(0.5, Number(event.target.value) || 0.5);
+            state.shortCut.duration = next;
+            paintShortRange();
+          },
+        })
+      ),
+      h("span", {
+        class: "meta short-cut-end",
+        text: `${clock(start)} → ${clock(end)}`,
+      })
+    ),
+    h(
+      "div",
+      { class: "short-cut-actions" },
+      h("button", {
+        class: "btn",
+        type: "button",
+        text: "Cancel",
+        onClick: () => closeShortCut(),
+      }),
+      h("button", {
+        class: "btn primary",
+        type: "button",
+        disabled: busy,
+        text: busy
+          ? state.shortCut.pendingDownload
+            ? "Processing…"
+            : "Working…"
+          : ready
+            ? "Download"
+            : "Process & download",
+        title: ready
+          ? "Download the 9:16 short"
+          : "Process this scene, then download the short",
+        onClick: () => confirmShortDownload(),
+      })
+    )
+  );
+}
+
+function paintShortRange() {
+  if (!shortCutOpen()) return;
+  const total = player.total || scenePlayTotal(state.sceneIndex) || 0;
+  const start = total > 0 ? Math.min(Math.max(0, player.at || 0), total) : Math.max(0, player.at || 0);
+  const duration = Math.max(0.5, Number(state.shortCut.duration) || 15);
+  if (scrubber?.shortRange) {
+    if (!(total > 0)) {
+      scrubber.shortRange.style.display = "none";
+    } else {
+      const width = Math.max(0, Math.min(total - start, duration)) / total;
+      scrubber.shortRange.style.display = "";
+      scrubber.shortRange.style.left = `${(start / total) * 100}%`;
+      scrubber.shortRange.style.width = `${width * 100}%`;
+    }
+  }
+  const startInput = document.querySelector(".short-cut-start");
+  if (startInput && document.activeElement !== startInput) {
+    const shown = String(Math.round(start * 10) / 10);
+    if (startInput.value !== shown) startInput.value = shown;
+  }
+  const endLabel = document.querySelector(".short-cut-end");
+  if (endLabel) {
+    const end = total > 0 ? Math.min(total, start + duration) : start + duration;
+    endLabel.textContent = `${clock(start)} → ${clock(end)}`;
+  }
+}
+
 /** Debug: save a JSON snapshot of the scene or full script. */
 function downloadJsonObject(data, filename) {
   const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], {
@@ -3346,6 +4535,152 @@ function downloadSceneImage() {
   if (!path) return;
   const name = path.split("/").pop() || "scene.png";
   window.location.href = `/download-asset?path=${encodeURIComponent(path)}&name=${encodeURIComponent(name)}`;
+}
+
+async function clearSceneImage({ deleteAsset = false } = {}) {
+  const owner = editOwnerScene() || scene();
+  if (!owner) return;
+  const path = owner.image || "";
+  owner.image = "";
+  if (deleteAsset && path) {
+    try {
+      await fetch(`/api/asset?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+      await refreshOutputs();
+    } catch {
+      /* still clear the scene assignment */
+    }
+  }
+  state.note = "";
+  changed();
+}
+
+async function createSceneImage() {
+  const entry = ensureSceneBrief();
+  const prompt = fullSceneImagePrompt(entry);
+  const prev = state.sceneGen || {};
+  if (!prompt.trim()) {
+    state.sceneGen = {
+      ...prev,
+      revealed: true,
+      status: "error",
+      error: "Add a scene prompt (and jar/episode style) first.",
+    };
+    render();
+    return;
+  }
+  state.sceneGen = { ...prev, revealed: true, status: "generating", error: "" };
+  render();
+  const stem =
+    (entry.title || "").trim().replace(/\s+/g, "-").slice(0, 40) ||
+    `scene-${(state.sceneIndex || 0) + 1}`;
+  try {
+    const response = await fetch("/api/generate-image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, name: stem, video: state.videoId }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Image generation failed");
+    await refreshOutputs();
+    pickImageForScene(data.path);
+    state.sceneGen = { ...prev, revealed: true, status: "idle", error: "" };
+    state.note = "Scene image generated";
+    if (state.ledger?.open) await refreshLedger({ silent: true });
+    else refreshLedger({ silent: true });
+    render();
+  } catch (error) {
+    state.sceneGen = {
+      ...prev,
+      revealed: true,
+      status: "error",
+      error: error.message || "Image generation failed",
+    };
+    render();
+  }
+}
+
+function sceneCreatePanel() {
+  if (isTransitionScene() || state.pictureExpanded) return null;
+  ensureCreativeBrief();
+  const entry = ensureSceneBrief();
+  const gen = state.sceneGen || {
+    revealed: false,
+    videoPromptOpen: false,
+    status: "idle",
+    error: "",
+  };
+  const generating = gen.status === "generating";
+  const videoPromptOpen = !!gen.videoPromptOpen;
+  return h(
+    "section",
+    { class: `scene-create${generating ? " is-generating" : ""}` },
+    h(
+      "div",
+      { class: `scene-create-video${videoPromptOpen ? " is-open" : ""}` },
+      h(
+        "button",
+        {
+          class: "scene-create-video-toggle",
+          type: "button",
+          "aria-expanded": videoPromptOpen ? "true" : "false",
+          onClick: () => {
+            state.sceneGen = { ...gen, videoPromptOpen: !videoPromptOpen };
+            render();
+          },
+        },
+        h("span", {
+          class: "details-chevron",
+          "aria-hidden": true,
+          text: videoPromptOpen ? "▾" : "▸",
+        }),
+        h("span", { text: "Video prompt" })
+      ),
+      videoPromptOpen &&
+        h("textarea", {
+          class: "brief-input scene-create-video-prompt",
+          rows: 4,
+          value: state.script.prompt || "",
+          disabled: generating,
+          "aria-label": "Video image prompt",
+          title: "House style for this video — used by every scene",
+          onInput: (event) => {
+            state.script.prompt = event.target.value;
+            markDetailsDirty();
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(save, 400);
+          },
+        })
+    ),
+    h("textarea", {
+      class: "brief-input scene-create-prompt",
+      rows: 3,
+      value: entry.image_prompt || "",
+      placeholder: "Describe this scene",
+      disabled: generating,
+      onInput: (event) => {
+        entry.image_prompt = event.target.value;
+        markDetailsDirty();
+      },
+    }),
+    h(
+      "div",
+      { class: "scene-create-actions" },
+      h(
+        "button",
+        {
+          class: "btn primary scene-create-btn",
+          type: "button",
+          disabled: generating,
+          onClick: () => createSceneImage(),
+        },
+        generating ? "Generating…" : "Create a scene"
+      )
+    ),
+    generating && h("p", { class: "scene-create-status", text: "Generating" }),
+    gen.status === "error" &&
+      gen.error &&
+      h("p", { class: "scene-create-error", text: gen.error })
+  );
 }
 
 function poll() {
@@ -3722,7 +5057,7 @@ function render() {
   app.classList.toggle("shell--landing", state.page === "landing");
   if (state.page !== "scene" && state.page !== "video") {
     state.pictureExpanded = false;
-    app.classList.remove("is-expanded");
+    app.classList.remove("is-expanded", "is-edit-split"); // is-edit-split legacy class
   }
   if (state.page !== "video") overlayUi = null;
 
@@ -3746,27 +5081,77 @@ function render() {
   paintPlayhead();
 }
 
+function speakerIcon({ muted = false } = {}) {
+  return h(
+    "svg",
+    {
+      class: "icon",
+      viewBox: "0 0 24 24",
+      width: "20",
+      height: "20",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.7",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "aria-hidden": true,
+    },
+    h("path", { d: "M4 10v4h3l5 4V6L7 10H4z" }),
+    muted
+      ? h("path", { d: "M16 10.5l4 4m0-4l-4 4" })
+      : h("path", { d: "M15.5 9.5a4 4 0 0 1 0 5M18 7.5a7 7 0 0 1 0 9" })
+  );
+}
+
+function syncLandingMute(video, muted) {
+  if (!video) return;
+  video.muted = muted;
+  video.defaultMuted = muted;
+  if (muted) video.setAttribute("muted", "");
+  else video.removeAttribute("muted");
+}
+
+function toggleLandingSound(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const video = document.querySelector(".landing-video");
+  const btn = event.currentTarget;
+  if (!video || !btn) return;
+  const nextMuted = !video.muted;
+  state.landingMuted = nextMuted;
+  syncLandingMute(video, nextMuted);
+  if (!nextMuted) {
+    const play = video.play();
+    if (play && typeof play.catch === "function") play.catch(() => {});
+  }
+  btn.classList.toggle("is-muted", nextMuted);
+  btn.setAttribute("aria-label", nextMuted ? "Unmute video" : "Mute video");
+  btn.setAttribute("title", nextMuted ? "Unmute" : "Mute");
+  btn.replaceChildren(speakerIcon({ muted: nextMuted }));
+}
+
 function landingView() {
   const copy = landingCopy();
+  const muted = state.landingMuted !== false;
+  state.landingMuted = muted;
   const video = h("video", {
     class: "landing-video",
     src: copy.video,
     poster: copy.poster,
     autoplay: true,
-    muted: true,
+    muted,
     loop: true,
     playsinline: true,
     preload: "auto",
   });
   // Attribute-only muted/autoplay is flaky (Safari + Reduce Motion). Drive it.
-  video.muted = true;
-  video.defaultMuted = true;
+  syncLandingMute(video, muted);
   video.playsInline = true;
-  video.setAttribute("muted", "");
   video.setAttribute("playsinline", "");
   video.setAttribute("webkit-playsinline", "");
   const kick = () => {
-    video.muted = true;
+    // Keep the user's unmute choice — only force muted on first autoplay path.
+    syncLandingMute(video, state.landingMuted !== false);
     const play = video.play();
     if (play && typeof play.catch === "function") play.catch(() => {});
   };
@@ -3840,6 +5225,17 @@ function landingView() {
       )
     ),
     h(
+      "button",
+      {
+        class: `landing-sound${muted ? " is-muted" : ""}`,
+        type: "button",
+        title: muted ? "Unmute" : "Mute",
+        "aria-label": muted ? "Unmute video" : "Mute video",
+        onClick: toggleLandingSound,
+      },
+      speakerIcon({ muted })
+    ),
+    h(
       "div",
       { class: "landing-scroll", "aria-hidden": "true" },
       h("span", { class: "landing-scroll-mark" })
@@ -3868,7 +5264,7 @@ function jarsView() {
     topbar(),
     h(
       "div",
-      { class: "video-page" },
+      { class: "video-page jars-page" },
       h("h1", { class: "page-title", text: "Jars" }),
       h("p", {
         class: "page-blurb",
@@ -3876,42 +5272,44 @@ function jarsView() {
       }),
       h(
         "div",
-        { class: "video-list" },
+        { class: "jar-grid" },
         state.jars.length
           ? state.jars.map((jar) =>
               h(
                 "button",
                 {
-                  class: "video-row",
+                  class: "jar-card",
                   type: "button",
                   onClick: () => go("jar", { jarId: jar.id }),
                 },
                 h("div", {
-                  class: `video-thumb${jar.thumb ? "" : " blank"}`,
+                  class: `jar-card-thumb${jar.thumb ? "" : " blank"}`,
                   style: mediaThumbStyle(jar.thumb),
+                  text: jar.thumb ? "" : "No thumb",
                 }),
                 h(
                   "div",
-                  { class: "video-meta" },
+                  { class: "jar-card-body" },
                   h(
                     "div",
                     { class: "jar-title-row" },
-                    h("span", { class: "name", text: jar.title }),
+                    h("span", { class: "jar-card-name", text: jar.title }),
                     h("span", {
                       class: "jar-descriptor",
                       text: jar.descriptor || "world",
                     })
                   ),
-                  h("span", {
-                    class: "len",
-                    text:
-                      (jar.summary
-                        ? jar.summary
-                        : `${jar.videos} video${jar.videos === 1 ? "" : "s"}`) +
-                      (jar.summary
-                        ? ` · ${jar.videos} video${jar.videos === 1 ? "" : "s"}`
-                        : ""),
-                  })
+                  jar.summary &&
+                    h("p", { class: "jar-card-summary", text: jar.summary }),
+                  h(
+                    "div",
+                    { class: "jar-card-foot" },
+                    h("span", { class: "jar-card-dot", "aria-hidden": true }),
+                    h("span", {
+                      class: "jar-card-count",
+                      text: `${jar.videos} video${jar.videos === 1 ? "" : "s"}`,
+                    })
+                  )
                 )
               )
             )
@@ -4467,6 +5865,7 @@ function videoView() {
   const { items, total } = videoTimeline();
   const bar = playerBar(total, "video");
   app.classList.toggle("is-expanded", state.pictureExpanded);
+  app.classList.remove("is-edit-split");
 
   return h(
     "div",
@@ -4474,57 +5873,73 @@ function videoView() {
     topbar(exportActions()),
     h(
       "div",
-      { class: "video-page" },
+      { class: "video-page is-workspace" },
       h(
-        "div",
-        { class: "page-title-row" },
-        h("h1", { class: "page-title", text: state.script.project || state.videoId }),
-        outputTag(state.outputs?.video)
-      ),
-      h("p", {
-        class: "page-blurb",
-        text: "Scenes play one after another. Place lower thirds on the preview, then open a scene to edit it.",
-      }),
-      creativeBrief(),
-      videoPreview(),
-      overlayToggles(),
-      bar,
-      renderStatus(),
-      h(
-        "div",
-        { class: "sequence-head" },
-        h("span", { text: "Scenes" }),
+        "aside",
+        { class: "video-sidebar" },
         h(
-          "span",
-          { class: "meta" },
-          (() => {
-            const normalIndexes = scenes()
-              .map((scene, index) => (!scene.is_transition ? index : -1))
-              .filter((index) => index >= 0);
-            const ready = normalIndexes.filter((index) => outputReady(sceneOutput(index))).length;
-            const parts = [clock(total)];
-            if (ready) parts.push(`${ready}/${normalIndexes.length} rendered`);
-            return parts.join(" · ");
-          })()
-        )
+          "section",
+          { class: "video-sidebar-section" },
+          h(
+            "div",
+            { class: "sequence-head" },
+            h("span", { text: "Scenes" }),
+            h(
+              "span",
+              { class: "meta" },
+              (() => {
+                const normalIndexes = scenes()
+                  .map((scene, index) => (!scene.is_transition ? index : -1))
+                  .filter((index) => index >= 0);
+                const ready = normalIndexes.filter((index) =>
+                  outputReady(sceneOutput(index))
+                ).length;
+                const parts = [clock(total)];
+                if (ready) parts.push(`${ready}/${normalIndexes.length} rendered`);
+                return parts.join(" · ");
+              })()
+            )
+          ),
+          sceneTimeline(items),
+          h(
+            "button",
+            {
+              class: "btn ghost add",
+              type: "button",
+              onClick: () => {
+                state.placingTransition = null;
+                scenes().push(blankScene());
+                const index = scenes().length - 1;
+                changed();
+                go("scene", { videoId: state.videoId, sceneIndex: index });
+              },
+            },
+            "+  Add scene"
+          )
+        ),
+        transitionPool()
       ),
-      sceneTimeline(items),
       h(
-        "button",
-        {
-          class: "btn ghost add",
-          type: "button",
-          onClick: () => {
-            state.placingTransition = null;
-            scenes().push(blankScene());
-            const index = scenes().length - 1;
-            changed();
-            go("scene", { videoId: state.videoId, sceneIndex: index });
-          },
-        },
-        "+  Add scene"
-      ),
-      transitionPool()
+        "div",
+        { class: "video-main" },
+        h(
+          "div",
+          { class: "page-title-row" },
+          h("h1", { class: "page-title", text: state.script.project || state.videoId }),
+          outputTag(state.outputs?.video),
+          ledgerButton()
+        ),
+        h("p", {
+          class: "page-blurb",
+          text: "Scenes play one after another. Place lower thirds on the preview, then open a scene to edit it.",
+        }),
+        creativeBrief(),
+        videoPreview(),
+        overlayToggles(),
+        bar,
+        renderStatus(),
+        ledgerPanel()
+      )
     )
   );
 }
@@ -5114,53 +6529,36 @@ function sceneCard(index, item) {
   );
 }
 
-/** Multi-use transition card — config template; Add places a linked variant. */
+/** Multi-use transition card — open to edit; variants are placed from the scene. */
 function transitionCard(index, item) {
   const entry = scenes()[index];
   const selected = state.placingTransition === index;
   const mapHold = transitionTiming(entry).total;
   const known = item.image && !item.missing;
   const variants = transitionPlacementRows(entry).length;
+  const open = () => {
+    state.placingTransition = null;
+    go("scene", { videoId: state.videoId, sceneIndex: index });
+  };
 
   return h(
     "div",
     {
       class: `scene-card is-transition${selected ? " selected" : ""}`,
     },
-    h(
-      "button",
-      {
-        class: `transition-use-btn${selected ? " is-on" : ""}`,
-        type: "button",
-        title: selected ? "Cancel" : "Place a variant between two scenes (linked to this config)",
-        onClick: (event) => {
-          event.stopPropagation();
-          state.movingScene = null;
-          state.placingTransition = selected ? null : index;
-          render();
-        },
-      },
-      selected ? "Cancel" : "Add"
-    ),
     h("div", {
       class: `scene-thumb${known ? "" : " blank"}`,
       style: known
         ? { backgroundImage: `url(/thumb?path=${encodeURIComponent(item.image)}&w=360)` }
         : {},
       text: known ? "" : "no image",
-      onClick: () => {
-        state.placingTransition = null;
-        go("scene", { videoId: state.videoId, sceneIndex: index });
-      },
+      onClick: open,
     }),
     h(
       "div",
       {
         class: "scene-meta",
-        onClick: () => {
-          state.placingTransition = null;
-          go("scene", { videoId: state.videoId, sceneIndex: index });
-        },
+        onClick: open,
       },
       h("div", { class: "scene-meta-top" }, h("span", { class: "name", text: item.title })),
       h("span", {
@@ -5254,18 +6652,18 @@ function transitionPool() {
   const placing = state.placingTransition;
 
   return h(
-    "div",
-    { class: "transition-pool" },
+    "section",
+    { class: "video-sidebar-section transition-pool" },
     h(
       "div",
       { class: "sequence-head" },
-      h("span", { text: "Multi-use" }),
+      h("span", { text: "Transitions" }),
       h("span", {
         class: "meta",
         text:
           placing !== null
-            ? "Click a red slot — places a variant (same map; its own zoom in/out)"
-            : "Add places a variant between scenes — shared map/timing, per-variant zoom rects",
+            ? "Click a red slot between scenes"
+            : "Shared map & timing — variants live on the timeline",
       })
     ),
     h(
@@ -5344,14 +6742,134 @@ function downloadIcon() {
   );
 }
 
+function uploadIcon() {
+  return h(
+    "svg",
+    {
+      class: "icon",
+      viewBox: "0 0 16 16",
+      width: "14",
+      height: "14",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.5",
+      "aria-hidden": true,
+    },
+    h("path", { d: "M8 13.5v-8M5 8l3-3 3 3M3 13.5h10" })
+  );
+}
+
+function pickImageFile({ accept = "image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" } = {}) {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = accept;
+    input.style.display = "none";
+    input.onchange = () => {
+      const file = input.files?.[0] || null;
+      input.remove();
+      resolve(file);
+    };
+    input.oncancel = () => {
+      input.remove();
+      resolve(null);
+    };
+    document.body.append(input);
+    input.click();
+  });
+}
+
+async function downloadEditRectangle(index) {
+  const list = sceneEdits();
+  if (index == null || index < 0 || index >= list.length) return;
+  const entry = normalizeEdit(list[index]);
+  list[index] = entry;
+  if (entry.file) {
+    const name = baseName(entry.file) || "still";
+    const link = document.createElement("a");
+    link.href = `/${entry.file}`;
+    link.download = /\.[^.]+$/.test(name) ? name : `${name}.png`;
+    link.click();
+    state.note = "Downloaded still";
+    render();
+    return;
+  }
+  await exportEditRegionStill(index, { clipboard: false });
+}
+
+function pickVideoFile() {
+  return pickImageFile({
+    accept: "video/mp4,video/webm,video/quicktime,.mp4,.mov,.webm,.mkv",
+  });
+}
+
+async function downloadAnimRectangle(index) {
+  const list = sceneAnims();
+  if (index == null || index < 0 || index >= list.length) return;
+  const entry = normalizeAnim(list[index]);
+  list[index] = entry;
+  // Always the region crop image — slot media is the video, not the download.
+  await exportAnimRegionStill(index, { clipboard: false });
+}
+
+function clearEditSlotContent(index = state.selectedEdit) {
+  const list = sceneEdits();
+  if (index == null || index < 0 || index >= list.length) return;
+  const entry = normalizeEdit(list[index]);
+  list[index] = entry;
+  if (!entry.file) {
+    state.note = "Slot is already empty";
+    render();
+    return;
+  }
+  entry.file = "";
+  if (state.stillGen?.editIndex === index) {
+    resetStillGen({
+      editIndex: index,
+      useClaude: state.stillGen.useClaude !== false,
+      change: state.stillGen.change || "",
+      jarToClaude: state.stillGen.jarToClaude || DEFAULT_JAR_TO_CLAUDE,
+      editPrompt: state.stillGen.editPrompt || "",
+    });
+  }
+  state.note = "Cleared still — rectangle kept";
+  changed();
+}
+
+function clearAnimSlotContent(index = state.selectedAnim) {
+  const list = sceneAnims();
+  if (index == null || index < 0 || index >= list.length) return;
+  const entry = normalizeAnim(list[index]);
+  list[index] = entry;
+  if (!entry.file) {
+    state.note = "Slot is already empty";
+    render();
+    return;
+  }
+  entry.file = "";
+  if (state.animGen?.animIndex === index) {
+    resetAnimGen({
+      animIndex: index,
+      useClaude: state.animGen.useClaude !== false,
+      change: state.animGen.change || "",
+      jarToClaude: state.animGen.jarToClaude || DEFAULT_JAR_TO_CLAUDE_VEO,
+      veoPrompt: state.animGen.veoPrompt || "",
+    });
+  }
+  state.note = "Cleared animation — rectangle kept";
+  changed();
+}
+
 function pictureStage(known, image) {
   const expanded = state.pictureExpanded;
-  const regionOn = expanded && state.regionTool;
+  const shortOn = shortCutOpen();
+  const regionOn = expanded && state.regionTool && !shortOn;
   const kind = state.regionKind === "still" ? "still" : "animation";
   const canFuse = filledSceneEdits().length > 0;
+  const shortRect = shortOn ? shortRectBox() : null;
   return h(
     "div",
-    { class: `picture-frame${expanded ? " is-expanded" : ""}` },
+    { class: `picture-frame${expanded ? " is-expanded" : ""}${shortOn ? " is-short-cut" : ""}` },
     known &&
       h(
         "button",
@@ -5366,6 +6884,39 @@ function pictureStage(known, image) {
           },
         },
         downloadIcon()
+      ),
+    known &&
+      h(
+        "button",
+        {
+          class: "picture-clear",
+          type: "button",
+          title: "Remove this picture",
+          "aria-label": "Remove picture",
+          onClick: (event) => {
+            event.stopPropagation();
+            clearSceneImage({ deleteAsset: false });
+          },
+        },
+        "×"
+      ),
+    known &&
+      !expanded &&
+      !isTransitionScene() &&
+      h(
+        "button",
+        {
+          class: `picture-short${shortOn ? " on" : ""}`,
+          type: "button",
+          title: shortOn ? "Cancel cut short" : "Cut a 9:16 short from this scene",
+          "aria-label": shortOn ? "Cancel cut short" : "Cut short",
+          onClick: (event) => {
+            event.stopPropagation();
+            if (shortOn) closeShortCut();
+            else openShortCut();
+          },
+        },
+        shortRectIcon()
       ),
     expanded &&
       known &&
@@ -5427,6 +6978,7 @@ function pictureStage(known, image) {
             h("span", { class: "picture-fuse-label", text: "Fuse" })
           )
       ),
+    pictureImagePicker(),
     h(
       "button",
       {
@@ -5436,8 +6988,13 @@ function pictureStage(known, image) {
         "aria-label": expanded ? "Exit full screen" : "Expand picture",
         onClick: (event) => {
           event.stopPropagation();
+          state.imagePickerOpen = false;
           state.pictureExpanded = !state.pictureExpanded;
           if (!state.pictureExpanded) state.regionTool = false;
+          if (state.pictureExpanded && shortCutOpen()) {
+            state.shortCut = null;
+            state.note = "";
+          }
           render();
         },
       },
@@ -5448,14 +7005,19 @@ function pictureStage(known, image) {
       {
         class: `picture${known ? "" : " blank"}${regionOn ? " region-mode" : ""}${
           regionOn && kind === "still" ? " edit-mode" : ""
-        }`,
+        }${shortOn ? " short-cut-mode" : ""}`,
         onPointerdown: (event) => {
           if (
             event.target.closest(
-              ".anim-layer, .edit-layer, .fade-zoom-guide, .picture-expand, .picture-download, .picture-region-tools, .region-capture"
+              ".anim-layer, .edit-layer, .fade-zoom-guide, .picture-expand, .picture-image-picker, .picture-download, .picture-clear, .picture-short, .picture-region-tools, .region-capture, .short-rect, .short-shade"
             )
           )
             return;
+          if (state.imagePickerOpen) {
+            state.imagePickerOpen = false;
+            render();
+          }
+          if (shortOn) return;
           if (state.selectedAnim !== null || state.selectedEdit !== null) {
             state.selectedAnim = null;
             state.selectedEdit = null;
@@ -5475,15 +7037,54 @@ function pictureStage(known, image) {
                 })`,
               },
             })
-          : h("span", { class: "picture-empty", text: "Pick a picture from Images" }),
+          : h("span", {
+              class: "picture-empty",
+              text: "Create a scene above, or pick an image",
+            }),
         // Still edits sit under animation overlays — all locked to the map zoom plane.
-        ...sceneEdits().map((entry, index) => editLayer(normalizeEdit(entry), index)),
-        ...sceneAnims().map((entry, index) => animLayer(normalizeAnim(entry), index)),
-        ...sceneEffects()
-          .map((entry) => normalizeEffect(entry))
-          .filter((entry) => state.assets.effects.some((effect) => effect.path === entry.file))
-          .map((entry) => effectLayer(entry.file, entry.speed))
+        ...(!shortOn
+          ? sceneEdits().map((entry, index) => editLayer(normalizeEdit(entry), index))
+          : []),
+        ...(!shortOn
+          ? sceneAnims().map((entry, index) => animLayer(normalizeAnim(entry), index))
+          : []),
+        ...(!shortOn
+          ? sceneEffects()
+              .map((entry) => normalizeEffect(entry))
+              .filter((entry) => state.assets.effects.some((effect) => effect.path === entry.file))
+              .map((entry) => effectLayer(entry.file, entry.speed))
+          : [])
       ),
+      shortOn &&
+        shortRect &&
+        h("div", {
+          class: "short-shade short-shade-left",
+          style: { width: `${shortRect.x * 100}%` },
+        }),
+      shortOn &&
+        shortRect &&
+        h("div", {
+          class: "short-shade short-shade-right",
+          style: {
+            left: `${(shortRect.x + shortRect.w) * 100}%`,
+            width: `${(1 - shortRect.x - shortRect.w) * 100}%`,
+          },
+        }),
+      shortOn &&
+        shortRect &&
+        h(
+          "div",
+          {
+            class: "short-rect",
+            style: {
+              left: `${shortRect.x * 100}%`,
+              width: `${shortRect.w * 100}%`,
+            },
+            title: "Drag left or right",
+            onPointerdown: beginShortRectDrag,
+          },
+          h("span", { class: "short-rect-label", text: "9:16" })
+        ),
       isTransitionScene() &&
         transitionStyleOf(scene()) === "fade_zoom" &&
         fadeZoomGuide("start"),
@@ -5705,6 +7306,7 @@ function sceneView() {
   const mapHold = timing?.total || 0;
 
   app.classList.toggle("is-expanded", state.pictureExpanded);
+  app.classList.remove("is-edit-split");
 
   return h(
     "div",
@@ -5777,29 +7379,16 @@ function sceneView() {
           )
         ),
         sceneDetails(),
-        filledSceneEdits().length > 0 &&
-          h(
-            "div",
-            { class: "fuse-bar" },
-            h("button", {
-              class: "btn",
-              type: "button",
-              text: "Fuse edits",
-              title: "Bake filled edits into a new PNG download (does not overwrite the scene image)",
-              onClick: () => fuseEditsAndDownload(),
-            }),
-            h("span", {
-              class: "meta",
-              text: "Downloads a fused still — original file stays put for now.",
-            })
-          ),
+        sceneCreatePanel(),
         pictureStage(known, image),
+        shortCutPanel(),
         (sceneAnims().length > 0 || sceneEdits().length > 0) &&
+          !shortCutOpen() &&
           h("p", {
             class: "anim-lock-note",
-            text: "Still or Animation — same rectangle. Copy still locks empty slots; filled stay movable.",
+            text: "Still — describe a change to regenerate the crop. Animation — describe what moves, then Generate with Veo.",
           }),
-        regionControlsDial(),
+        !shortCutOpen() && regionControlsDial(),
         bar,
         renderStatus(),
         transition
@@ -6100,10 +7689,6 @@ function sceneToolbar() {
       state.pruneAnims = on;
       render();
     }),
-    libraryGroup("Images", "images", libraryImages(), state.pruneImages, (on) => {
-      state.pruneImages = on;
-      render();
-    }),
     !isTransitionScene() &&
       libraryGroup("Songs", "music", state.assets.music || [], state.pruneSongs, (on) => {
         state.pruneSongs = on;
@@ -6118,6 +7703,92 @@ function sceneToolbar() {
 
 function libraryImages() {
   return (state.assets.images || []).filter((image) => image.path.startsWith("assets/images/"));
+}
+
+function pictureImagePicker() {
+  const open = !!state.imagePickerOpen;
+  const images = libraryImages();
+  const current = editOwnerScene()?.image || scene()?.image || "";
+  const input = h("input", {
+    class: "file-input",
+    type: "file",
+    accept: "image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp",
+    multiple: true,
+    onChange: async (event) => {
+      const files = [...(event.target.files || [])];
+      event.target.value = "";
+      for (const file of files) await uploadAsset("images", file);
+      state.imagePickerOpen = true;
+      render();
+    },
+  });
+  return h(
+    "div",
+    { class: `picture-image-picker${open ? " is-open" : ""}` },
+    h(
+      "button",
+      {
+        class: "picture-pick",
+        type: "button",
+        title: open ? "Close image picker" : "Pick an image",
+        "aria-label": open ? "Close image picker" : "Pick an image",
+        "aria-expanded": open ? "true" : "false",
+        onClick: (event) => {
+          event.stopPropagation();
+          state.imagePickerOpen = !open;
+          render();
+        },
+      },
+      pictureIcon(),
+      h("span", { class: "picture-pick-caret", "aria-hidden": true, text: open ? "▴" : "▾" })
+    ),
+    open &&
+      h(
+        "div",
+        {
+          class: "picture-image-menu",
+          onClick: (event) => event.stopPropagation(),
+          onPointerdown: (event) => event.stopPropagation(),
+        },
+        h(
+          "div",
+          { class: "picture-image-menu-head" },
+          h("span", { text: "Images" }),
+          h(
+            "button",
+            {
+              class: "group-icon",
+              type: "button",
+              title: "Upload images",
+              onClick: () => input.click(),
+            },
+            plusIcon()
+          ),
+          input
+        ),
+        images.length
+          ? h(
+              "div",
+              { class: "picture-image-grid" },
+              ...images.map((item) =>
+                h("button", {
+                  class: `picture-image-option${item.path === current ? " on" : ""}`,
+                  type: "button",
+                  title: item.name,
+                  style: {
+                    backgroundImage: `url(/thumb?path=${encodeURIComponent(item.path)}&w=160)`,
+                  },
+                  onClick: () => {
+                    pickImageForScene(item.path);
+                    state.imagePickerOpen = false;
+                    render();
+                  },
+                })
+              )
+            )
+          : h("p", { class: "empty-note", text: "No pictures yet" })
+      )
+  );
 }
 
 function libraryGroup(label, kind, items, pruning, setPruning) {
@@ -6276,16 +7947,25 @@ function toggleSceneSound(path, on) {
   changed();
 }
 
-function fillAnimSlot(path) {
+function fillAnimSlot(path, { replace = false } = {}) {
   const list = sceneAnims();
-  if (sceneHasAnim(path)) return false;
+  if (!replace && sceneHasAnim(path)) return false;
   let index = state.selectedAnim;
-  if (index === null || index < 0 || index >= list.length || !isPendingAnim(list[index])) {
+  if (
+    index === null ||
+    index < 0 ||
+    index >= list.length ||
+    (!replace && !isPendingAnim(list[index]))
+  ) {
     index = list.findIndex((entry) => isPendingAnim(entry));
   }
-  if (index < 0) return false;
+  if (index < 0 && replace && state.selectedAnim != null) {
+    index = state.selectedAnim;
+  }
+  if (index < 0 || index >= list.length) return false;
   const slot = normalizeAnim(list[index]);
   slot.file = path;
+  slot.locked = true;
   list[index] = slot;
   state.selectedAnim = index;
   state.selectedEdit = null;
@@ -6688,8 +8368,8 @@ function animCanDrag(entry) {
 
 function animChrome(index, entry) {
   const selected = state.selectedAnim === index;
-  const locked = !!entry.locked;
   const canDrag = animCanDrag(entry);
+  const hasMedia = !!entry.file;
   return [
     selected &&
       h(
@@ -6697,27 +8377,57 @@ function animChrome(index, entry) {
         {
           class: "anim-copy",
           type: "button",
-          title: locked
-            ? "Copy still again (already locked)"
-            : "Copy still for Jim — locks position",
+          title: "Download the crop image from this rectangle",
           onClick: (event) => {
             event.stopPropagation();
-            exportAnimRegionStill(index);
+            downloadAnimRectangle(index);
           },
         },
         downloadIcon()
+      ),
+    selected &&
+      h(
+        "button",
+        {
+          class: "anim-copy anim-upload",
+          type: "button",
+          title: "Upload an MP4 into this rectangle",
+          onClick: async (event) => {
+            event.stopPropagation();
+            const file = await pickVideoFile();
+            if (file) await uploadAnimVideo(file, index);
+          },
+        },
+        uploadIcon()
+      ),
+    selected &&
+      hasMedia &&
+      h(
+        "button",
+        {
+          class: "anim-copy anim-clear",
+          type: "button",
+          title: "Clear animation — keep rectangle",
+          "aria-label": "Clear animation",
+          onClick: (event) => {
+            event.stopPropagation();
+            clearAnimSlotContent(index);
+          },
+        },
+        trashIcon()
       ),
     selected && h("div", { class: "anim-mark", "aria-hidden": "true" }),
     selected &&
       h("button", {
         class: "anim-remove",
         type: "button",
-        title: "Remove",
+        title: "Remove rectangle",
         text: "×",
         onClick: (event) => {
           event.stopPropagation();
           sceneAnims().splice(index, 1);
           state.selectedAnim = null;
+          if (state.animGen?.animIndex === index) resetAnimGen();
           changed();
         },
       }),
@@ -6732,7 +8442,12 @@ function animChrome(index, entry) {
 }
 
 function animLayerPointer(event, index, entry) {
-  if (event.target.closest(".anim-handle, .anim-remove, .anim-copy, .anim-mark")) return;
+  if (
+    event.target.closest(
+      ".anim-handle, .anim-remove, .anim-copy, .anim-upload, .anim-clear, .anim-mark"
+    )
+  )
+    return;
   if (!animCanDrag(entry)) {
     event.stopPropagation();
     selectAnim(index);
@@ -6856,8 +8571,7 @@ function editCanDrag(entry) {
 
 function editChrome(index, entry) {
   const selected = state.selectedEdit === index;
-  const locked = !!entry.locked;
-  const canDrag = editCanDrag(entry);
+  const hasMedia = !!entry.file;
   return [
     selected &&
       h(
@@ -6865,42 +8579,74 @@ function editChrome(index, entry) {
         {
           class: "anim-copy",
           type: "button",
-          title: locked
-            ? "Copy still again (already locked)"
-            : "Copy still — locks position",
+          title: entry.file
+            ? "Download this still"
+            : "Download crop from this rectangle",
           onClick: (event) => {
             event.stopPropagation();
-            exportEditRegionStill(index);
+            downloadEditRectangle(index);
           },
         },
         downloadIcon()
       ),
-    selected && h("div", { class: "anim-mark", "aria-hidden": "true" }),
+    selected &&
+      h(
+        "button",
+        {
+          class: "anim-copy anim-upload",
+          type: "button",
+          title: "Upload a photo into this rectangle",
+          onClick: async (event) => {
+            event.stopPropagation();
+            const file = await pickImageFile();
+            if (file) await uploadEditStill(file, index);
+          },
+        },
+        uploadIcon()
+      ),
+    selected &&
+      hasMedia &&
+      h(
+        "button",
+        {
+          class: "anim-copy anim-clear",
+          type: "button",
+          title: "Clear still — keep rectangle",
+          "aria-label": "Clear still",
+          onClick: (event) => {
+            event.stopPropagation();
+            clearEditSlotContent(index);
+          },
+        },
+        trashIcon()
+      ),
+    selected && h("div", { class: "anim-mark", "aria-hidden": true }),
     selected &&
       h("button", {
         class: "anim-remove",
         type: "button",
-        title: "Remove",
+        title: "Remove rectangle",
         text: "×",
         onClick: (event) => {
           event.stopPropagation();
           sceneEdits().splice(index, 1);
           state.selectedEdit = null;
+          if (state.stillGen?.editIndex === index) {
+            resetStillGen();
+          }
           changed();
         },
-      }),
-    selected &&
-      canDrag &&
-      h("div", {
-        class: "anim-handle",
-        title: "Resize",
-        onPointerdown: (event) => beginEditResize(event, index),
       }),
   ];
 }
 
 function editLayerPointer(event, index, entry) {
-  if (event.target.closest(".anim-handle, .anim-remove, .anim-copy, .anim-mark")) return;
+  if (
+    event.target.closest(
+      ".anim-handle, .anim-remove, .anim-copy, .anim-upload, .anim-clear, .anim-mark"
+    )
+  )
+    return;
   if (!editCanDrag(entry)) {
     event.stopPropagation();
     selectEdit(index);
@@ -6914,25 +8660,22 @@ function editLayer(entry, index) {
   sceneEdits()[index] = normalized;
   const selected = state.selectedEdit === index;
   const pending = !normalized.file;
-  const locked = !!normalized.locked;
-  const canDrag = editCanDrag(normalized);
   const soft = normalized.soft_edges ? " soft-edges" : "";
 
   if (pending) {
     return h(
       "div",
       {
-        class: `edit-layer anim-layer is-pending is-edit${selected ? " selected" : ""}${
-          locked ? " is-locked" : ""
-        }${canDrag ? " can-drag" : ""}`,
+        class: `edit-layer anim-layer is-pending is-edit${selected ? " selected" : ""} is-locked`,
         style: animLayerStyle(normalized),
-        title: canDrag
-          ? "Drag to move, or Copy still to lock"
-          : "Locked — Unlock below to move, or paste/upload the still",
-        onPointerdown: (event) => editLayerPointer(event, index, normalized),
+        title: "Describe the change below — Claude + ChatGPT will fill this still",
+        onPointerdown: (event) => {
+          event.stopPropagation();
+          selectEdit(index);
+        },
       },
       h("div", { class: "anim-pending-fill", "aria-hidden": "true" }),
-      h("span", { class: "anim-pending-label", text: locked ? "Paste still" : "Edit" }),
+      h("span", { class: "anim-pending-label", text: "Edit" }),
       ...editChrome(index, normalized)
     );
   }
@@ -6942,10 +8685,14 @@ function editLayer(entry, index) {
     {
       class: `edit-layer anim-layer is-edit aspect-${normalized.aspect || "landscape"}${
         selected ? " selected" : ""
-      }${locked ? " is-locked" : ""}${canDrag ? " can-drag" : ""}`,
+      }`,
       style: animLayerStyle(normalized),
-      title: "Drag to move or resize",
-      onPointerdown: (event) => editLayerPointer(event, index, normalized),
+      title: "Still edit",
+      onPointerdown: (event) => {
+        if (event.target.closest(".anim-remove, .anim-mark")) return;
+        event.stopPropagation();
+        selectEdit(index);
+      },
     },
     h("img", {
       class: `edit-still${soft}`,
@@ -6958,146 +8705,455 @@ function editLayer(entry, index) {
 }
 
 function stillSlotDial(entry, index) {
-  const aspect = entry.aspect === "portrait" ? "portrait" : "landscape";
-  const filled = !!entry.file;
-  const fileInput = h("input", {
-    class: "sr-only",
-    type: "file",
-    accept: "image/png,image/jpeg,image/webp,image/gif",
-    onChange: async (event) => {
-      const file = event.target.files?.[0];
-      event.target.value = "";
-      if (file) await uploadEditStill(file, index);
-    },
-  });
+  const gen = state.stillGen || {};
+  const forThis = gen.editIndex == null || gen.editIndex === index;
+  const busy = forThis && (gen.status === "prompting" || gen.status === "imaging");
+  const change = forThis ? gen.change || "" : "";
+  // Keep the except-clause live from the change box (manual jar edits are overwritten on type).
+  const jarToClaude = composeJarToClaude(change);
+  const editPrompt = forThis ? gen.editPrompt || "" : "";
+  const useClaude = forThis ? gen.useClaude !== false : true;
+  const promptDone = forThis && !!gen.promptDone;
+  const imageDone = forThis && !!gen.imageDone;
+  const prompting = forThis && gen.status === "prompting";
+  const imaging = forThis && gen.status === "imaging";
+  const error = forThis ? gen.error || "" : "";
+
+  const patchStillGen = (patch, { redraw = true } = {}) => {
+    state.stillGen = {
+      change: "",
+      jarToClaude: DEFAULT_JAR_TO_CLAUDE,
+      status: "idle",
+      editPrompt: "",
+      useClaude: true,
+      promptDone: false,
+      imageDone: false,
+      error: "",
+      ...(state.stillGen || {}),
+      editIndex: index,
+      ...patch,
+    };
+    if (redraw) render();
+  };
+
   return [
-    regionKindToggle("still", convertSelectedSlotKind, { disabled: filled }),
-    !entry.locked &&
-      regionAspectToggle(aspect, (next) => {
-        applyEditAspect(entry, next);
-        state.regionAspect = next;
-        changed();
-      }),
-    h("button", {
-      class: "btn primary",
-      type: "button",
-      text: entry.locked ? "Copy again" : "Copy still",
-      title: entry.locked
-        ? "Copy the still again (slot stays locked)"
-        : "Download and copy — locks this slot",
-      onClick: () => exportEditRegionStill(index),
-    }),
-    h("button", {
-      class: "btn",
-      type: "button",
-      text: filled ? "Replace still" : "Upload still",
-      title: "Upload the adjusted frame into this slot",
-      onClick: () => fileInput.click(),
-    }),
-    fileInput,
-    h(
-      "label",
-      { class: `anim-check${entry.soft_edges ? " on" : ""}` },
-      h("input", {
-        type: "checkbox",
-        checked: entry.soft_edges,
-        onChange: () => {
-          entry.soft_edges = !entry.soft_edges;
-          changed();
+    h("div", { class: "still-gen" },
+      stillGenStatusBar({
+        useClaude,
+        busy,
+        prompting,
+        imaging,
+        promptDone,
+        imageDone,
+        promptLabel: "Generate edit prompt",
+        imageLabel: "Generate new image",
+        onToggleClaude: () => {
+          patchStillGen({ useClaude: !useClaude });
         },
       }),
-      h("span", { text: "Fade edges" })
+      h("p", {
+        class: "still-gen-label",
+        text: "What would you like to change?",
+      }),
+      h("textarea", {
+        class: "brief-input still-gen-change",
+        rows: 3,
+        value: change,
+        placeholder: "e.g. add a steaming mug on the table",
+        disabled: busy,
+        onInput: (event) => {
+          const next = event.target.value;
+          const jar = composeJarToClaude(next);
+          patchStillGen({ change: next, jarToClaude: jar, error: "" }, { redraw: false });
+          const root = event.target.closest(".still-gen");
+          const jarEl = root?.querySelector(".still-gen-jar");
+          if (jarEl) jarEl.value = jar;
+          const err = root?.querySelector(".still-gen-error");
+          if (err) err.remove();
+        },
+      }),
+      stillGenFieldLabel("Wonderjar → Claude", state.models?.anthropic || ""),
+      h("textarea", {
+        class: "brief-input still-gen-jar",
+        rows: 2,
+        value: jarToClaude,
+        disabled: busy || !useClaude,
+        "aria-label": "Wonderjar to Claude prompt",
+        onInput: (event) => {
+          patchStillGen({ jarToClaude: event.target.value }, { redraw: false });
+        },
+      }),
+      stillGenFieldLabel("Claude → ChatGPT", state.models?.openaiImage || ""),
+      h("textarea", {
+        class: "brief-input still-gen-claude is-editable",
+        rows: 6,
+        value: editPrompt,
+        disabled: busy,
+        "aria-label": "Claude to ChatGPT prompt",
+        title: "Editable — paste your own prompt to skip Claude, or let Claude fill this",
+        placeholder: "Claude’s ChatGPT prompt will show here — or paste your own…",
+        onInput: (event) => {
+          patchStillGen({ editPrompt: event.target.value, error: "" }, { redraw: false });
+        },
+      }),
+      h(
+        "label",
+        { class: `anim-check${entry.soft_edges ? " on" : ""}` },
+        h("input", {
+          type: "checkbox",
+          checked: entry.soft_edges,
+          disabled: busy,
+          onChange: () => {
+            entry.soft_edges = !entry.soft_edges;
+            changed();
+          },
+        }),
+        h("span", { text: "Fade edges" })
+      ),
+      h(
+        "div",
+        { class: "still-gen-actions" },
+        h(
+          "button",
+          {
+            class: "btn ghost",
+            type: "button",
+            disabled: busy,
+            title: entry.file
+              ? "Download the still in this rectangle"
+              : "Download the crop inside this rectangle",
+            onClick: () => downloadEditRectangle(index),
+            text: "Download",
+          }
+        ),
+        h(
+          "button",
+          {
+            class: "btn ghost",
+            type: "button",
+            disabled: busy,
+            title: "Upload a photo into this rectangle",
+            onClick: async () => {
+              const file = await pickImageFile();
+              if (file) await uploadEditStill(file, index);
+            },
+            text: "Upload",
+          }
+        ),
+        entry.file &&
+          !busy &&
+          h(
+            "button",
+            {
+              class: "btn ghost still-gen-clear",
+              type: "button",
+              title: "Clear still — keep rectangle",
+              "aria-label": "Clear still",
+              onClick: () => clearEditSlotContent(index),
+            },
+            trashIcon()
+          ),
+        h(
+          "button",
+          {
+            class: "btn primary still-gen-run",
+            type: "button",
+            disabled: busy,
+            onClick: () => {
+              const liveChange =
+                document.querySelector(".still-gen-change")?.value ??
+                state.stillGen?.change ??
+                "";
+              const liveJar =
+                document.querySelector(".still-gen-jar")?.value ??
+                state.stillGen?.jarToClaude ??
+                DEFAULT_JAR_TO_CLAUDE;
+              const livePrompt =
+                document.querySelector(".still-gen-claude")?.value ??
+                state.stillGen?.editPrompt ??
+                "";
+              const sendClaude = state.stillGen?.useClaude !== false;
+              patchStillGen({
+                change: liveChange,
+                jarToClaude: liveJar,
+                // Clear only when Claude will refill; keep paste when Claude is off.
+                editPrompt: sendClaude ? "" : livePrompt,
+                useClaude: sendClaude,
+                status: "idle",
+                error: "",
+                promptDone: false,
+                imageDone: false,
+              });
+              runStillEditGenerate(index);
+            },
+          },
+          busy
+            ? prompting
+              ? "Asking Claude…"
+              : "Editing with ChatGPT…"
+            : entry.file
+              ? "Replace still"
+              : "Generate still"
+        ),
+        editPrompt &&
+          !busy &&
+          h(
+            "button",
+            {
+              class: "btn ghost still-gen-rerun",
+              type: "button",
+              title: "Send this crop + Claude → ChatGPT prompt to ChatGPT again",
+              onClick: () => runStillImageFromPrompt(index),
+            },
+            "Regenerate from prompt"
+          )
+      ),
+      error && h("p", { class: "still-gen-error", text: error })
     ),
-    entry.locked &&
-      !filled &&
-      h("button", {
-        class: "btn",
-        type: "button",
-        text: "Unlock",
-        title: "Unlock so you can drag or resize this slot again",
-        onClick: () => {
-          entry.locked = false;
-          changed();
+  ];
+}
+
+function animSlotDial(entry, index) {
+  const gen = state.animGen || {};
+  const forThis = gen.animIndex == null || gen.animIndex === index;
+  const busy = forThis && (gen.status === "prompting" || gen.status === "imaging");
+  const change = forThis ? gen.change || "" : "";
+  const jarToClaude =
+    forThis && gen.jarToClaude ? gen.jarToClaude : DEFAULT_JAR_TO_CLAUDE_VEO;
+  const veoPrompt = forThis ? gen.veoPrompt || "" : "";
+  const useClaude = forThis ? gen.useClaude !== false : true;
+  const promptDone = forThis && !!gen.promptDone;
+  const imageDone = forThis && !!gen.imageDone;
+  const prompting = forThis && gen.status === "prompting";
+  const imaging = forThis && gen.status === "imaging";
+  const error = forThis ? gen.error || "" : "";
+
+  const patchAnimGen = (patch, { redraw = true } = {}) => {
+    state.animGen = {
+      change: "",
+      jarToClaude: DEFAULT_JAR_TO_CLAUDE_VEO,
+      status: "idle",
+      veoPrompt: "",
+      useClaude: true,
+      promptDone: false,
+      imageDone: false,
+      error: "",
+      ...(state.animGen || {}),
+      animIndex: index,
+      ...patch,
+    };
+    if (redraw) render();
+  };
+
+  return [
+    h("div", { class: "still-gen anim-gen" },
+      stillGenStatusBar({
+        useClaude,
+        busy,
+        prompting,
+        imaging,
+        promptDone,
+        imageDone,
+        claudeLabel: "Generate Veo prompt",
+        promptLabel: "Generate Veo prompt",
+        imageLabel: "Generate animation",
+        onToggleClaude: () => {
+          patchAnimGen({ useClaude: !useClaude });
         },
       }),
-    filledSceneEdits().length > 0 &&
-      h("button", {
-        class: "btn",
-        type: "button",
-        text: "Fuse edits",
-        title: "Bake filled edits into a PNG download (original map/scene stays put)",
-        onClick: () => fuseEditsAndDownload(),
+      h("p", {
+        class: "still-gen-label",
+        text: "What should move in this region?",
       }),
-    h("span", {
-      class: "meta",
-      text: filled
-        ? "Drag or resize anytime. Paste or upload again to replace the still."
-        : entry.locked
-          ? "Locked. Paste (⌘V) or upload the adjusted still — it snaps here. Unlock to move."
-          : "Drag or resize, Copy still to lock, then paste the edited frame back.",
-    }),
+      h("textarea", {
+        class: "brief-input still-gen-change anim-gen-change",
+        rows: 3,
+        value: change,
+        placeholder: "e.g. only the candle flame flickers; everything else stays frozen",
+        disabled: busy,
+        onInput: (event) => {
+          patchAnimGen({ change: event.target.value, error: "" }, { redraw: false });
+          const err = event.target.closest(".anim-gen")?.querySelector(".still-gen-error");
+          if (err) err.remove();
+        },
+      }),
+      stillGenFieldLabel("Wonderjar → Claude", state.models?.anthropic || ""),
+      h("textarea", {
+        class: "brief-input still-gen-jar anim-gen-jar",
+        rows: 3,
+        value: jarToClaude,
+        disabled: busy || !useClaude,
+        "aria-label": "Wonderjar to Claude Veo prompt",
+        onInput: (event) => {
+          patchAnimGen({ jarToClaude: event.target.value }, { redraw: false });
+        },
+      }),
+      stillGenFieldLabel("Claude → Veo", state.models?.veo || ""),
+      h("textarea", {
+        class: "brief-input still-gen-claude anim-gen-claude is-editable",
+        rows: 6,
+        value: veoPrompt,
+        disabled: busy,
+        "aria-label": "Claude to Veo prompt",
+        title: "Editable — paste your own prompt to skip Claude, or let Claude fill this",
+        placeholder: "Claude’s Veo prompt will show here — or paste your own…",
+        onInput: (event) => {
+          patchAnimGen({ veoPrompt: event.target.value, error: "" }, { redraw: false });
+        },
+      }),
+      h(
+        "label",
+        { class: `anim-check${entry.soft_edges ? " on" : ""}` },
+        h("input", {
+          type: "checkbox",
+          checked: entry.soft_edges,
+          disabled: busy,
+          onChange: () => {
+            entry.soft_edges = !entry.soft_edges;
+            changed();
+          },
+        }),
+        h("span", { text: "Fade edges" })
+      ),
+      h(
+        "div",
+        { class: "still-gen-actions" },
+        h(
+          "button",
+          {
+            class: "btn ghost",
+            type: "button",
+            disabled: busy,
+            title: "Download the crop image from this rectangle",
+            onClick: () => downloadAnimRectangle(index),
+            text: "Download",
+          }
+        ),
+        h(
+          "button",
+          {
+            class: "btn ghost",
+            type: "button",
+            disabled: busy,
+            title: "Upload an MP4 into this rectangle",
+            onClick: async () => {
+              const file = await pickVideoFile();
+              if (file) await uploadAnimVideo(file, index);
+            },
+            text: "Upload",
+          }
+        ),
+        entry.file &&
+          !busy &&
+          h(
+            "button",
+            {
+              class: "btn ghost still-gen-clear",
+              type: "button",
+              title: "Clear animation — keep rectangle",
+              "aria-label": "Clear animation",
+              onClick: () => clearAnimSlotContent(index),
+            },
+            trashIcon()
+          ),
+        h(
+          "button",
+          {
+            class: "btn primary still-gen-run",
+            type: "button",
+            disabled: busy,
+            onClick: () => {
+              const liveChange =
+                document.querySelector(".anim-gen-change")?.value ||
+                state.animGen?.change ||
+                "";
+              const liveJar =
+                document.querySelector(".anim-gen-jar")?.value ||
+                state.animGen?.jarToClaude ||
+                DEFAULT_JAR_TO_CLAUDE_VEO;
+              const livePrompt =
+                document.querySelector(".anim-gen-claude")?.value ||
+                state.animGen?.veoPrompt ||
+                "";
+              const sendClaude = state.animGen?.useClaude !== false;
+              // Keep the pasted Veo prompt in state; skip a full redraw so we
+              // don't race the generate call against a replaced textarea.
+              state.animGen = {
+                ...(state.animGen || {}),
+                change: liveChange,
+                jarToClaude: liveJar,
+                veoPrompt: livePrompt,
+                useClaude: sendClaude,
+                animIndex: index,
+                status: "idle",
+                error: "",
+                promptDone: false,
+                imageDone: false,
+              };
+              runAnimGenerate(index);
+            },
+          },
+          busy
+            ? prompting
+              ? "Asking Claude…"
+              : "Generating with Veo…"
+            : entry.file
+              ? "Replace animation"
+              : "Generate animation"
+        ),
+        veoPrompt &&
+          !busy &&
+          h(
+            "button",
+            {
+              class: "btn ghost still-gen-rerun",
+              type: "button",
+              title: "Send this crop + Claude → Veo prompt to Veo again",
+              onClick: () => runAnimVideoFromPrompt(index),
+            },
+            "Regenerate from prompt"
+          ),
+        h(
+          "button",
+          {
+            class: "btn ghost",
+            type: "button",
+            disabled: busy,
+            title: entry.locked
+              ? "Copy the still again (slot stays locked)"
+              : "Download and copy crop — locks this slot",
+            onClick: () => exportAnimRegionStill(index),
+            text: entry.locked ? "Copy again" : "Copy still",
+          }
+        ),
+        entry.locked &&
+          !busy &&
+          h("button", {
+            class: "btn ghost",
+            type: "button",
+            text: "Unlock",
+            title: "Unlock so you can drag or resize this slot again",
+            onClick: () => {
+              entry.locked = false;
+              changed();
+            },
+          })
+      ),
+      error && h("p", { class: "still-gen-error", text: error })
+    ),
   ];
 }
 
 function pendingAnimSlotDial(entry, index) {
-  const aspect = entry.aspect === "portrait" ? "portrait" : "landscape";
-  return [
-    regionKindToggle("animation", convertSelectedSlotKind, { disabled: false }),
-    !entry.locked &&
-      regionAspectToggle(aspect, (next) => {
-        applyAnimAspect(entry, next);
-        state.regionAspect = next;
-        changed();
-      }),
-    h("button", {
-      class: "btn primary",
-      type: "button",
-      text: entry.locked ? "Copy again" : "Copy still",
-      title: entry.locked
-        ? "Copy the still again (slot stays locked)"
-        : "Download and copy for Jim — locks this slot",
-      onClick: () => exportAnimRegionStill(index),
-    }),
-    entry.locked &&
-      h("button", {
-        class: "btn",
-        type: "button",
-        text: "Unlock",
-        title: "Unlock so you can drag or resize this slot again",
-        onClick: () => {
-          entry.locked = false;
-          changed();
-        },
-      }),
-    h(
-      "label",
-      { class: `anim-check${entry.soft_edges ? " on" : ""}` },
-      h("input", {
-        type: "checkbox",
-        checked: entry.soft_edges,
-        onChange: () => {
-          entry.soft_edges = !entry.soft_edges;
-          changed();
-        },
-      }),
-      h("span", { text: "Fade edges" })
-    ),
-    h("span", {
-      class: "meta",
-      text: entry.locked
-        ? "Locked. Add an animation while selected — it snaps here. Unlock to move the slot."
-        : "Drag or resize, then Copy still to lock. Next animation you add fills this slot.",
-    }),
-  ];
+  return animSlotDial(entry, index);
 }
 
-function filledAnimSlotDial(entry, index) {
+function filledAnimSlotDial(entry, index, { chrome = true } = {}) {
   const setAspect = (next) => {
     entry.aspect = entry.aspect === next ? "native" : next;
     changed();
   };
   return [
-    regionKindToggle("animation", convertSelectedSlotKind, { disabled: true }),
     animDialRow("Light", {
       min: 20,
       max: 180,
@@ -7179,20 +9235,22 @@ function filledAnimSlotDial(entry, index) {
         text: entry.aspect === "native" ? "native" : entry.aspect === "landscape" ? "16:9" : "9:16",
       })
     ),
-    h(
-      "label",
-      { class: `anim-check${entry.soft_edges ? " on" : ""}` },
-      h("input", {
-        type: "checkbox",
-        checked: entry.soft_edges,
-        onChange: () => {
-          entry.soft_edges = !entry.soft_edges;
-          changed();
-        },
-      }),
-      h("span", { text: "Fade edges" })
-    ),
-    entry.locked &&
+    chrome &&
+      h(
+        "label",
+        { class: `anim-check${entry.soft_edges ? " on" : ""}` },
+        h("input", {
+          type: "checkbox",
+          checked: entry.soft_edges,
+          onChange: () => {
+            entry.soft_edges = !entry.soft_edges;
+            changed();
+          },
+        }),
+        h("span", { text: "Fade edges" })
+      ),
+    chrome &&
+      entry.locked &&
       h("button", {
         class: "btn",
         type: "button",
@@ -7207,16 +9265,102 @@ function filledAnimSlotDial(entry, index) {
   ];
 }
 
+function regionPanelHead(label, { kind = "still", collapsed = false } = {}) {
+  const drag = state.pictureExpanded
+    ? kind === "anim"
+      ? beginAnimPanelDrag
+      : beginStillPanelDrag
+    : undefined;
+  // Kind (Still/Animation) lives on the picture toolbar — header is drag + collapse only.
+  return h(
+    "div",
+    {
+      class: `still-gen-drag${drag ? "" : " no-drag"}`,
+      title: drag ? "Drag to move" : collapsed ? "Expand form" : "Collapse form",
+      onPointerdown: drag,
+    },
+    label && h("span", { class: "still-gen-drag-label", text: label }),
+    h(
+      "div",
+      { class: "still-gen-drag-actions" },
+      drag && h("span", { class: "still-gen-drag-grip", "aria-hidden": true, text: "⠿" }),
+      h(
+        "button",
+        {
+          class: "still-gen-collapse",
+          type: "button",
+          title: collapsed ? "Expand form" : "Collapse form",
+          "aria-label": collapsed ? "Expand form" : "Collapse form",
+          "aria-expanded": collapsed ? "false" : "true",
+          onPointerdown: (event) => event.stopPropagation(),
+          onClick: (event) => {
+            event.stopPropagation();
+            if (kind === "anim") {
+              state.animGen = {
+                ...(state.animGen || {}),
+                animIndex: state.selectedAnim,
+                collapsed: !collapsed,
+              };
+            } else {
+              state.stillGen = {
+                ...(state.stillGen || {}),
+                editIndex: state.selectedEdit,
+                collapsed: !collapsed,
+              };
+            }
+            render();
+          },
+          text: collapsed ? "▸" : "▾",
+        }
+      )
+    )
+  );
+}
+
+function regionCollapsedMeta(gen, { imagingLabel = "Working…" } = {}) {
+  return h("p", {
+    class: "still-gen-collapsed-meta muted",
+    text:
+      gen?.status === "prompting"
+        ? "Asking Claude…"
+        : gen?.status === "imaging"
+          ? imagingLabel
+          : String(gen?.change || "").trim() || "Collapsed — expand to edit",
+  });
+}
+
 function regionControlsDial() {
   if (state.selectedEdit !== null) {
     const list = sceneEdits();
     if (state.selectedEdit >= list.length) return null;
     const entry = normalizeEdit(list[state.selectedEdit]);
     list[state.selectedEdit] = entry;
+    const gen = state.stillGen || {};
+    const collapsed = !!gen.collapsed;
+    const moved =
+      state.pictureExpanded &&
+      Number.isFinite(gen.panelX) &&
+      Number.isFinite(gen.panelY);
     return h(
       "div",
-      { class: "anim-dials pending-hint edit-dials" },
-      ...stillSlotDial(entry, state.selectedEdit)
+      {
+        class: `anim-dials pending-hint edit-dials${moved ? " is-moved" : ""}${
+          collapsed ? " is-collapsed" : ""
+        }`,
+        style: moved
+          ? {
+              left: `${gen.panelX}px`,
+              top: `${gen.panelY}px`,
+              right: "auto",
+              bottom: "auto",
+              transform: "none",
+            }
+          : {},
+      },
+      regionPanelHead("", { kind: "still", collapsed }),
+      ...(collapsed
+        ? [regionCollapsedMeta(gen, { imagingLabel: "Editing with ChatGPT…" })]
+        : stillSlotDial(entry, state.selectedEdit))
     );
   }
   if (state.selectedAnim === null) return null;
@@ -7224,17 +9368,50 @@ function regionControlsDial() {
   if (state.selectedAnim >= list.length) return null;
   const entry = normalizeAnim(list[state.selectedAnim]);
   list[state.selectedAnim] = entry;
+  const gen = state.animGen || {};
+  const collapsed = !!gen.collapsed;
+  const moved =
+    state.pictureExpanded &&
+    Number.isFinite(gen.panelX) &&
+    Number.isFinite(gen.panelY);
+  const panelClass = `anim-dials pending-hint edit-dials${moved ? " is-moved" : ""}${
+    collapsed ? " is-collapsed" : ""
+  }`;
+  const panelStyle = moved
+    ? {
+        left: `${gen.panelX}px`,
+        top: `${gen.panelY}px`,
+        right: "auto",
+        bottom: "auto",
+        transform: "none",
+      }
+    : {};
+  const collapsedBits = [
+    regionCollapsedMeta(gen, { imagingLabel: "Generating with Veo…" }),
+  ];
   if (!entry.file) {
     return h(
       "div",
-      { class: "anim-dials pending-hint" },
-      ...pendingAnimSlotDial(entry, state.selectedAnim)
+      { class: panelClass, style: panelStyle },
+      regionPanelHead("", { kind: "anim", collapsed }),
+      ...(collapsed ? collapsedBits : pendingAnimSlotDial(entry, state.selectedAnim))
     );
   }
   return h(
     "div",
-    { class: `anim-dials${state.pictureExpanded ? " pending-hint" : ""}` },
-    ...filledAnimSlotDial(entry, state.selectedAnim)
+    {
+      class: state.pictureExpanded
+        ? panelClass
+        : `anim-dials pending-hint edit-dials${collapsed ? " is-collapsed" : ""}`,
+      style: state.pictureExpanded ? panelStyle : {},
+    },
+    regionPanelHead("", { kind: "anim", collapsed }),
+    ...(collapsed
+      ? collapsedBits
+      : [
+          ...animSlotDial(entry, state.selectedAnim),
+          ...filledAnimSlotDial(entry, state.selectedAnim, { chrome: false }),
+        ])
   );
 }
 
@@ -7261,6 +9438,39 @@ async function uploadEditStill(file, index = state.selectedEdit) {
     await refreshOutputs();
     if (!fillEditSlot(data.path, { replace: true })) {
       state.note = "Uploaded, but no edit slot was selected";
+      render();
+    }
+  } catch (error) {
+    state.note = error.message || "Upload failed";
+    render();
+  }
+}
+
+async function uploadAnimVideo(file, index = state.selectedAnim) {
+  if (!file || index == null) return;
+  state.selectedAnim = index;
+  state.selectedEdit = null;
+  state.regionKind = "animation";
+  state.note = `Uploading ${file.name}…`;
+  render();
+  try {
+    const owner = editOwnerScene();
+    const stem = (owner?.image ? baseName(owner.image) : "anim") || "anim";
+    const ext = (file.name.match(/\.[^.]+$/) || [".mp4"])[0].toLowerCase();
+    const name = `${stem}-anim-${Date.now()}${ext}`;
+    const response = await fetch(
+      `/api/asset?kind=${encodeURIComponent("animations")}&name=${encodeURIComponent(name)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      }
+    );
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Upload failed");
+    await refreshOutputs();
+    if (!fillAnimSlot(data.path, { replace: true })) {
+      state.note = "Uploaded, but no animation slot was selected";
       render();
     }
   } catch (error) {
@@ -7823,6 +10033,12 @@ function playerBar(total, mode) {
     });
   }
 
+  const shortRange = h("div", {
+    class: "rail-short-range",
+    style: { display: shortCutOpen() ? "" : "none" },
+    "aria-hidden": true,
+  });
+  children.push(shortRange);
   children.push(knob);
   const rail = h(
     "div",
@@ -7830,7 +10046,15 @@ function playerBar(total, mode) {
     ...children
   );
 
-  scrubber = { fill, knob, elapsed, rows: [], cards: [], events: eventMarks };
+  scrubber = {
+    fill,
+    knob,
+    elapsed,
+    rows: [],
+    cards: [],
+    events: eventMarks,
+    shortRange,
+  };
 
   return h(
     "div",
@@ -8120,6 +10344,11 @@ window.addEventListener("keydown", (event) => {
     save();
   }
   if (event.key === "Escape") {
+    if (state.ledger?.open) {
+      state.ledger = { ...state.ledger, open: false };
+      render();
+      return;
+    }
     if (state.pickerOpen) {
       state.pickerOpen = false;
       render();

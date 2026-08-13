@@ -8,6 +8,11 @@ assets/sounds/**
 assets/videos/**
 !assets/**/.gitkeep
 
+# Secrets
+.env
+.env.*
+!.env.example
+
 # Build / editor caches
 out/
 .cache/

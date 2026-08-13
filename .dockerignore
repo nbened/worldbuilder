@@ -1,0 +1,22 @@
+.git
+.venv
+__pycache__
+*.pyc
+.cache
+.scratch
+out
+*.json.bak
+.DS_Store
+README.md
+**/.DS_Store
+.env
+.env.*
+# Media is gitignored and uploaded to Railway volumes after deploy.
+assets/images/**
+assets/maps/**
+assets/music/**
+assets/effects/**
+assets/animations/**
+assets/sounds/**
+assets/videos/**
+!assets/**/.gitkeep

@@ -16,6 +16,7 @@ Jars → videos → scenes. Data lives in jars/*.json and videos/*.json.
 from __future__ import annotations
 
 import argparse
+import base64
 import errno
 import hashlib
 import json
@@ -27,6 +28,9 @@ import signal
 import subprocess
 import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,7 +42,159 @@ VIDEOS = ROOT / "videos"
 JARS = ROOT / "jars"
 CACHE = ROOT / ".cache" / "thumbs"
 AUDIO_CACHE = ROOT / ".cache" / "audio"
+LEDGER_DIR = ROOT / ".cache" / "ledger"
 VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+_ledger_lock = threading.Lock()
+
+# USD per 1M tokens (input, output) — published / guesstimate list prices
+CLAUDE_TOKEN_RATES_USD = {
+    "claude-opus-5": (5.0, 25.0),
+    "claude-sonnet-4-5": (3.0, 15.0),
+    "claude-sonnet-4-20250514": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
+
+# Flat USD guesstimates for GPT Image when the API does not return a dollar amount
+IMAGE_FLAT_COST_USD = {
+    ("gpt-image-1.5", "high", "1024x1024"): 0.04,
+    ("gpt-image-1.5", "high", "1536x1024"): 0.08,
+    ("gpt-image-1.5", "high", "1024x1536"): 0.08,
+    ("gpt-image-1", "high", "1024x1024"): 0.04,
+    ("gpt-image-1", "high", "1536x1024"): 0.08,
+    ("gpt-image-1", "high", "1024x1536"): 0.08,
+    ("gpt-image-2", "high", "1024x1024"): 0.05,
+    ("gpt-image-2", "high", "1536x1024"): 0.10,
+    ("gpt-image-2", "high", "1024x1536"): 0.10,
+}
+
+# Flat USD guesstimates for Veo (no dollar amount in API response)
+VEO_FLAT_COST_USD = {
+    "veo-3.1-generate-preview": 1.2,
+    "veo-3.1-fast-generate-preview": 0.6,
+    "veo-3.0-generate-001": 1.0,
+}
+
+
+def load_dotenv(path: Path | None = None) -> None:
+    """Load KEY=VALUE pairs from .env into os.environ (does not override)."""
+    env_path = path or (ROOT / ".env")
+    if not env_path.is_file():
+        return
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_dotenv()
+
+
+def estimate_claude_cost(model: str, usage: dict | None) -> tuple[float, bool]:
+    """Return (usd, estimated). Uses token usage when present."""
+    usage = usage or {}
+    inp = int(usage.get("input_tokens") or 0)
+    out = int(usage.get("output_tokens") or 0)
+    rates = CLAUDE_TOKEN_RATES_USD.get(model)
+    if not rates:
+        # Prefer longest matching prefix
+        for key, value in CLAUDE_TOKEN_RATES_USD.items():
+            if model.startswith(key) or key.startswith(model.split("-20")[0]):
+                rates = value
+                break
+    if not rates:
+        rates = (5.0, 25.0)
+    if inp or out:
+        cost = (inp * rates[0] + out * rates[1]) / 1_000_000
+        return cost, True
+    # Fallback when usage missing — rough mid call
+    return 0.02, True
+
+
+def estimate_image_cost(model: str, size: str = "1536x1024", quality: str = "high") -> tuple[float, bool]:
+    key = (model, quality, size)
+    if key in IMAGE_FLAT_COST_USD:
+        return IMAGE_FLAT_COST_USD[key], True
+    for (mod, qual, sz), price in IMAGE_FLAT_COST_USD.items():
+        if model.startswith(mod) and qual == quality and sz == size:
+            return price, True
+    # Default landscape high
+    return 0.08, True
+
+
+def estimate_veo_cost(model: str, duration_seconds: int = 4) -> tuple[float, bool]:
+    base = VEO_FLAT_COST_USD.get(model)
+    if not base:
+        for key, price in VEO_FLAT_COST_USD.items():
+            if model.startswith(key) or key.startswith(model.split("-generate")[0]):
+                base = price
+                break
+    if not base:
+        base = 1.2
+    # Scale roughly with duration around a 4s baseline
+    cost = base * (max(1, int(duration_seconds)) / 4.0)
+    return round(cost, 4), True
+
+
+def append_ledger(
+    video_id: str | None,
+    *,
+    provider: str,
+    model: str,
+    note: str,
+    cost: float,
+    estimated: bool = True,
+    meta: dict | None = None,
+) -> None:
+    if not video_id or not VIDEO_ID.match(video_id):
+        return
+    LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "provider": provider,
+        "model": model,
+        "note": note,
+        "cost": round(float(cost), 6),
+        "estimated": bool(estimated),
+        "meta": meta or {},
+    }
+    path = LEDGER_DIR / f"{video_id}.jsonl"
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    with _ledger_lock:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+
+
+def read_ledger(video_id: str) -> dict:
+    path = LEDGER_DIR / f"{video_id}.jsonl"
+    entries: list[dict] = []
+    if path.is_file():
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    total = sum(float(item.get("cost") or 0) for item in entries)
+    return {
+        "video": video_id,
+        "entries": entries,
+        "total": round(total, 4),
+        "currency": "USD",
+        "estimated": True,
+    }
 
 
 def python_bin() -> str:
@@ -95,6 +251,152 @@ def output_path(script: dict, scene: int | None = None) -> Path:
     if scene is not None:
         return path.with_name(f"{path.stem}-scene{scene}{path.suffix}")
     return path
+
+
+def short_output_path(script: dict, scene: int) -> Path:
+    """9:16 vertical snip cut from a scene clip."""
+    scene_clip = output_path(script, scene=scene)
+    return scene_clip.with_name(f"{scene_clip.stem}-short{scene_clip.suffix}")
+
+
+def probe_video_size(path: Path) -> tuple[int, int] | None:
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        width_s, height_s = proc.stdout.strip().split("x", 1)
+        width, height = int(width_s), int(height_s)
+    except ValueError:
+        return None
+    if width < 2 or height < 2:
+        return None
+    return width, height
+
+
+def make_scene_short(
+    source: Path,
+    target: Path,
+    *,
+    cx: float = 0.5,
+    start: float = 0.0,
+    duration: float | None = None,
+) -> Path:
+    """Crop a landscape scene clip to 9:16 (cx-anchored), trim, and scale to 1080×1920."""
+    size = probe_video_size(source)
+    if not size:
+        raise RuntimeError("could not read scene video size")
+    width, height = size
+    # Tallest 9:16 window that fits in the frame.
+    crop_h = height
+    crop_w = int(round(crop_h * 9 / 16 / 2) * 2)
+    if crop_w > width:
+        crop_w = width - (width % 2)
+        crop_h = int(round(crop_w * 16 / 9 / 2) * 2)
+    cx = min(1.0, max(0.0, float(cx)))
+    x = int(round((width - crop_w) * cx))
+    y = int(round((height - crop_h) * 0.5))
+    x = max(0, min(width - crop_w, x))
+    y = max(0, min(height - crop_h, y))
+    x -= x % 2
+    y -= y % 2
+
+    start = max(0.0, float(start or 0.0))
+    dur = None if duration is None else max(0.05, float(duration))
+    source_duration = probe_duration(source) or 0.0
+    if source_duration > 0 and start >= source_duration:
+        raise RuntimeError("start is past the end of the scene clip")
+    if dur is not None and source_duration > 0:
+        dur = min(dur, max(0.05, source_duration - start))
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Rebuild when the source scene clip or cut params change.
+    if target.exists():
+        try:
+            if target.stat().st_mtime_ns >= source.stat().st_mtime_ns:
+                meta = target.with_suffix(target.suffix + ".short.json")
+                if meta.exists():
+                    try:
+                        saved = json.loads(meta.read_text())
+                        if (
+                            saved.get("source_mtime_ns") == source.stat().st_mtime_ns
+                            and abs(float(saved.get("cx", 0.5)) - cx) < 1e-6
+                            and abs(float(saved.get("start", 0.0)) - start) < 1e-3
+                            and (
+                                (saved.get("duration") is None and dur is None)
+                                or (
+                                    saved.get("duration") is not None
+                                    and dur is not None
+                                    and abs(float(saved["duration"]) - dur) < 1e-3
+                                )
+                            )
+                            and saved.get("crop") == [crop_w, crop_h, x, y]
+                        ):
+                            return target
+                    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                        pass
+        except OSError:
+            pass
+
+    vf = (
+        f"crop={crop_w}:{crop_h}:{x}:{y},"
+        f"scale=1080:1920:flags=lanczos,setsar=1,format=yuv420p"
+    )
+    command = ["ffmpeg", "-y", "-v", "error"]
+    if start > 0.001:
+        command += ["-ss", f"{start:.3f}"]
+    command += ["-i", str(source)]
+    if dur is not None:
+        command += ["-t", f"{dur:.3f}"]
+    command += [
+        "-vf",
+        vf,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        str(target),
+    ]
+    proc = subprocess.run(command, capture_output=True, text=True)
+    if proc.returncode != 0 or not target.exists():
+        detail = (proc.stderr or proc.stdout or "ffmpeg failed").strip()
+        raise RuntimeError(detail.splitlines()[-1] if detail else "ffmpeg failed")
+    meta = target.with_suffix(target.suffix + ".short.json")
+    meta.write_text(
+        json.dumps(
+            {
+                "source": source.name,
+                "source_mtime_ns": source.stat().st_mtime_ns,
+                "cx": cx,
+                "start": start,
+                "duration": dur,
+                "crop": [crop_w, crop_h, x, y],
+            }
+        )
+    )
+    return target
 
 
 def expected_scene_duration(script: dict, scene_number: int, music: dict[str, float] | None = None) -> float | None:
@@ -626,10 +928,16 @@ def mixed_audio(script_path: Path, scene_index: int | None = None) -> Path | Non
 
 
 def safe_path(relative: str) -> Path | None:
-    candidate = (ROOT / unquote(relative).lstrip("/")).resolve()
-    if candidate.is_file() and ROOT in candidate.parents:
-        return candidate
-    return None
+    """Resolve a project-relative file path.
+
+    Allows Railway volume symlinks (e.g. /app/assets → /data/assets) while
+    still blocking path escape via `..`.
+    """
+    rel = Path(unquote(relative).lstrip("/"))
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+    candidate = (ROOT / rel).resolve()
+    return candidate if candidate.is_file() else None
 
 
 ASSET_FOLDERS = {
@@ -655,6 +963,407 @@ def safe_asset_write(kind: str, filename: str) -> Path | None:
     except ValueError:
         return None
     return target
+
+
+def unique_asset_filename(kind: str, stem: str, ext: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9_-]+", "-", (stem or "").strip()).strip("-")[:48] or kind.rstrip("s")
+    suffix = ext if ext.startswith(".") else f".{ext}"
+    folder_info = ASSET_FOLDERS.get(kind)
+    folder = folder_info[0] if folder_info else (ROOT / "assets" / kind)
+    folder.mkdir(parents=True, exist_ok=True)
+    name = f"{base}{suffix}"
+    if not (folder / name).exists():
+        return name
+    n = 2
+    while (folder / f"{base}-{n}{suffix}").exists():
+        n += 1
+    return f"{base}-{n}{suffix}"
+
+
+def unique_image_filename(stem: str, ext: str = "png") -> str:
+    return unique_asset_filename("images", stem, ext)
+
+
+def _openai_image_error(exc: urllib.error.HTTPError) -> str:
+    detail = exc.read().decode("utf-8", errors="replace")
+    try:
+        err = json.loads(detail).get("error") or {}
+        return err.get("message") or detail or f"OpenAI HTTP {exc.code}"
+    except json.JSONDecodeError:
+        return detail or f"OpenAI HTTP {exc.code}"
+
+
+def _openai_image_result(payload: dict) -> tuple[bytes, str]:
+    item = (payload.get("data") or [{}])[0]
+    b64 = item.get("b64_json")
+    if b64:
+        return base64.b64decode(b64), "png"
+    url = item.get("url")
+    if not url:
+        raise RuntimeError("OpenAI returned no image data")
+    with urllib.request.urlopen(url, timeout=120) as img:
+        raw = img.read()
+        ctype = (img.headers.get_content_type() or "image/png").lower()
+        ext = "jpg" if "jpeg" in ctype else "png"
+        return raw, ext
+
+
+def openai_generate_image(
+    prompt: str, size: str = "1536x1024"
+) -> tuple[bytes, str, str, dict]:
+    """Call OpenAI Images API. Returns (bytes, ext, model, meta)."""
+    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+    model = (os.environ.get("OPENAI_IMAGE_MODEL") or "gpt-image-2").strip() or "gpt-image-2"
+    allowed = {"1024x1024", "1536x1024", "1024x1536"}
+    if size not in allowed:
+        size = "1536x1024"
+    body = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "quality": "high",
+        "n": 1,
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/images/generations",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(_openai_image_error(exc)) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"OpenAI request failed: {exc.reason}") from exc
+    raw, ext = _openai_image_result(payload)
+    meta = {"size": size, "quality": "high", "usage": payload.get("usage") or {}}
+    return raw, ext, model, meta
+
+
+def openai_edit_image(
+    prompt: str,
+    image_bytes: bytes,
+    media_type: str = "image/png",
+    size: str = "1536x1024",
+) -> tuple[bytes, str, str, dict]:
+    """Edit an image with GPT Image. Returns (bytes, ext, model, meta)."""
+    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+    model = (os.environ.get("OPENAI_IMAGE_MODEL") or "gpt-image-2").strip() or "gpt-image-2"
+    allowed = {"1024x1024", "1536x1024", "1024x1536"}
+    if size not in allowed:
+        size = "1536x1024"
+    if media_type not in {"image/png", "image/jpeg", "image/webp"}:
+        media_type = "image/png"
+    ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(media_type, "png")
+    boundary = f"----WonderjarBoundary{os.urandom(8).hex()}"
+    chunks: list[bytes] = []
+
+    def add_field(name: str, value: str) -> None:
+        chunks.append(f"--{boundary}\r\n".encode())
+        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        chunks.append(value.encode("utf-8"))
+        chunks.append(b"\r\n")
+
+    add_field("model", model)
+    add_field("prompt", prompt)
+    add_field("size", size)
+    add_field("quality", "high")
+    # gpt-image-2 rejects input_fidelity; older gpt-image models accept it.
+    if model.startswith("gpt-image") and not model.startswith("gpt-image-2"):
+        add_field("input_fidelity", "high")
+    chunks.append(f"--{boundary}\r\n".encode())
+    chunks.append(
+        (
+            f'Content-Disposition: form-data; name="image"; filename="crop.{ext}"\r\n'
+            f"Content-Type: {media_type}\r\n\r\n"
+        ).encode()
+    )
+    chunks.append(image_bytes)
+    chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(chunks)
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/images/edits",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(_openai_image_error(exc)) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"OpenAI request failed: {exc.reason}") from exc
+    raw, out_ext = _openai_image_result(payload)
+    meta = {"size": size, "quality": "high", "usage": payload.get("usage") or {}}
+    return raw, out_ext, model, meta
+
+
+def claude_vision_prompt(
+    image_b64: str,
+    media_type: str,
+    jar_to_claude: str,
+    change: str,
+    *,
+    system: str,
+    fallback_instruction: str,
+) -> tuple[str, str, dict]:
+    """Ask Claude for a downstream media prompt. Returns (prompt, model, usage)."""
+    key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+    model = (os.environ.get("ANTHROPIC_MODEL") or "claude-opus-5").strip() or "claude-opus-5"
+    if media_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+        media_type = "image/png"
+    instruction = jar_to_claude.strip() or fallback_instruction
+    user_text = f"{instruction}\n\n{change.strip()}"
+    body = {
+        "model": model,
+        "max_tokens": 1200,
+        "system": system,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": image_b64,
+                        },
+                    },
+                    {"type": "text", "text": user_text},
+                ],
+            }
+        ],
+    }
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        message = detail
+        try:
+            err = json.loads(detail).get("error") or {}
+            message = err.get("message") or detail
+        except json.JSONDecodeError:
+            pass
+        raise RuntimeError(message or f"Anthropic HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Anthropic request failed: {exc.reason}") from exc
+
+    parts = []
+    for block in payload.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = str(block.get("text") or "").strip()
+            if text:
+                parts.append(text)
+    prompt = "\n\n".join(parts).strip()
+    if not prompt:
+        raise RuntimeError("Claude returned an empty prompt")
+    usage = payload.get("usage") or {}
+    return prompt, model, usage
+
+
+def claude_still_edit_prompt(
+    image_b64: str,
+    media_type: str,
+    jar_to_claude: str,
+    change: str,
+) -> tuple[str, str, dict]:
+    return claude_vision_prompt(
+        image_b64,
+        media_type,
+        jar_to_claude,
+        change,
+        system=(
+            "You write prompts for ChatGPT image editing. "
+            "Output ONLY the ChatGPT image prompt — no preamble, no quotes, no markdown."
+        ),
+        fallback_instruction=(
+            "Give me a ChatGPT prompt that keeps all else exactly the same in this picture, "
+            "except for these changes"
+        ),
+    )
+
+
+def claude_veo_prompt(
+    image_b64: str,
+    media_type: str,
+    jar_to_claude: str,
+    change: str,
+) -> tuple[str, str, dict]:
+    return claude_vision_prompt(
+        image_b64,
+        media_type,
+        jar_to_claude,
+        change,
+        system=(
+            "You write prompts for Google Veo image-to-video animation. "
+            "Output ONLY the Veo prompt — no preamble, no quotes, no markdown."
+        ),
+        fallback_instruction=(
+            "Give me a Veo prompt that keeps a locked-off camera and freezes everything "
+            "except the one motion described"
+        ),
+    )
+
+
+def veo_generate_video(
+    prompt: str,
+    image_bytes: bytes,
+    media_type: str = "image/png",
+    aspect_ratio: str = "16:9",
+    duration_seconds: int = 4,
+) -> tuple[bytes, str, str, dict]:
+    """Generate a short video with Veo from a still crop. Returns (bytes, ext, model, meta)."""
+    key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("GEMINI_API_KEY is not set")
+    model = (
+        os.environ.get("VEO_MODEL") or "veo-3.1-generate-preview"
+    ).strip() or "veo-3.1-generate-preview"
+    if media_type not in {"image/png", "image/jpeg", "image/webp"}:
+        media_type = "image/png"
+    if aspect_ratio not in {"16:9", "9:16"}:
+        aspect_ratio = "16:9"
+    duration_seconds = 4 if duration_seconds not in {4, 6, 8} else int(duration_seconds)
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    # Veo predictLongRunning expects Vertex-style image fields, not Gemini inlineData.
+    body = {
+        "instances": [
+            {
+                "prompt": prompt,
+                "image": {
+                    "bytesBase64Encoded": image_b64,
+                    "mimeType": media_type,
+                },
+            }
+        ],
+        "parameters": {
+            "aspectRatio": aspect_ratio,
+            "durationSeconds": duration_seconds,
+            "sampleCount": 1,
+        },
+    }
+    start_url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:predictLongRunning"
+    )
+    req = urllib.request.Request(
+        start_url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "x-goog-api-key": key,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            started = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        message = detail
+        try:
+            err = json.loads(detail).get("error") or {}
+            message = err.get("message") or detail
+        except json.JSONDecodeError:
+            pass
+        raise RuntimeError(message or f"Veo HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Veo request failed: {exc.reason}") from exc
+
+    op_name = str(started.get("name") or "").strip()
+    if not op_name:
+        raise RuntimeError("Veo did not return an operation name")
+
+    deadline = time.time() + 600
+    payload: dict = {}
+    while time.time() < deadline:
+        poll_url = f"https://generativelanguage.googleapis.com/v1beta/{op_name}"
+        poll_req = urllib.request.Request(
+            poll_url,
+            headers={"x-goog-api-key": key},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(poll_req, timeout=60) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(detail or f"Veo poll HTTP {exc.code}") from exc
+        if payload.get("done"):
+            break
+        time.sleep(8)
+    else:
+        raise RuntimeError("Veo timed out waiting for the video")
+
+    if payload.get("error"):
+        err = payload.get("error") or {}
+        raise RuntimeError(err.get("message") or str(err))
+
+    response = payload.get("response") or {}
+    samples = (
+        (response.get("generateVideoResponse") or {}).get("generatedSamples")
+        or response.get("generatedSamples")
+        or []
+    )
+    if not samples:
+        raise RuntimeError("Veo returned no video samples")
+    video_info = (samples[0] or {}).get("video") or {}
+    video_uri = str(video_info.get("uri") or "").strip()
+    inline = video_info.get("inlineData") or video_info.get("bytesBase64Encoded")
+    if video_uri:
+        dl_req = urllib.request.Request(
+            video_uri,
+            headers={"x-goog-api-key": key},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(dl_req, timeout=180) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(detail or f"Veo download HTTP {exc.code}") from exc
+    elif isinstance(inline, dict) and inline.get("data"):
+        raw = base64.b64decode(inline["data"], validate=False)
+    elif isinstance(inline, str) and inline:
+        raw = base64.b64decode(inline, validate=False)
+    else:
+        raise RuntimeError("Veo response missing video uri")
+    if not raw:
+        raise RuntimeError("Veo returned an empty video")
+    meta = {
+        "aspect_ratio": aspect_ratio,
+        "duration_seconds": duration_seconds,
+        "operation": op_name,
+    }
+    return raw, "mp4", model, meta
 
 
 def safe_asset_delete(relative: str) -> Path | None:
@@ -821,6 +1530,31 @@ class Handler(BaseHTTPRequestHandler):
             jar_id = (self.query().get("j") or [None])[0]
             self.send_json({"videos": list_videos(jar_id)})
             return
+        if route == "/api/config":
+            self.send_json(
+                {
+                    "anthropic_model": (
+                        os.environ.get("ANTHROPIC_MODEL") or "claude-opus-5"
+                    ).strip()
+                    or "claude-opus-5",
+                    "openai_image_model": (
+                        os.environ.get("OPENAI_IMAGE_MODEL") or "gpt-image-2"
+                    ).strip()
+                    or "gpt-image-2",
+                    "veo_model": (
+                        os.environ.get("VEO_MODEL") or "veo-3.1-generate-preview"
+                    ).strip()
+                    or "veo-3.1-generate-preview",
+                }
+            )
+            return
+        if route == "/api/ledger":
+            video_id = (self.query().get("v") or [""])[0]
+            if not video_id or not VIDEO_ID.match(video_id):
+                self.send_json({"error": "video required"}, status=400)
+                return
+            self.send_json(read_ledger(video_id))
+            return
         if route == "/api/state":
             required = self.require_video()
             if not required:
@@ -882,6 +1616,51 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_media(target, download_as=target.name)
             return
+        if route == "/download-short":
+            # One-click 9:16 snip of a processed scene clip.
+            required = self.require_video()
+            if not required:
+                return
+            _, path = required
+            script = load_script(path)
+            scene_raw = (self.query().get("scene") or [None])[0]
+            if scene_raw is None or scene_raw == "":
+                self.send_error(400, "scene is required")
+                return
+            try:
+                scene = int(scene_raw)
+            except ValueError:
+                self.send_error(400, "scene must be an integer")
+                return
+            if scene < 1 or scene > len(script.get("scenes") or []):
+                self.send_error(404, f"there is no scene {scene}")
+                return
+            source = output_path(script, scene=scene)
+            if not source.exists():
+                self.send_error(404, "process the scene first")
+                return
+            try:
+                cx = float((self.query().get("cx") or ["0.5"])[0] or 0.5)
+                start = float((self.query().get("start") or ["0"])[0] or 0)
+            except ValueError:
+                self.send_error(400, "cx and start must be numbers")
+                return
+            duration = None
+            duration_raw = (self.query().get("duration") or [None])[0]
+            if duration_raw not in (None, ""):
+                try:
+                    duration = float(duration_raw)
+                except ValueError:
+                    self.send_error(400, "duration must be a number")
+                    return
+            target = short_output_path(script, scene)
+            try:
+                make_scene_short(source, target, cx=cx, start=start, duration=duration)
+            except RuntimeError as exc:
+                self.send_error(500, str(exc))
+                return
+            self.send_media(target, download_as=target.name)
+            return
         if route == "/download-asset":
             source = safe_path((self.query().get("path") or [""])[0])
             if not source:
@@ -924,6 +1703,15 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/asset/rename":
             self.rename_asset()
             return
+        if route == "/api/generate-image":
+            self.generate_image()
+            return
+        if route == "/api/edit-still":
+            self.edit_still()
+            return
+        if route == "/api/generate-anim":
+            self.generate_anim()
+            return
         if route == "/api/render/stop":
             stopped = render.stop()
             self.send_json(render.snapshot(), status=200 if stopped else 409)
@@ -959,6 +1747,312 @@ class Handler(BaseHTTPRequestHandler):
 
         started = render.start(path, video_id=video_id, scene=scene)
         self.send_json(render.snapshot(), status=200 if started else 409)
+
+    def generate_image(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0 or length > 200_000:
+            self.send_json({"error": "missing or oversized JSON body"}, status=400)
+            return
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError as exc:
+            self.send_json({"error": f"invalid JSON: {exc}"}, status=400)
+            return
+
+        prompt = str(payload.get("prompt") or "").strip()
+        if not prompt:
+            self.send_json({"error": "prompt is required"}, status=400)
+            return
+        if len(prompt) > 12000:
+            self.send_json({"error": "prompt is too long"}, status=400)
+            return
+
+        stem = str(payload.get("name") or "").strip() or f"scene-{int(time.time())}"
+        size = str(payload.get("size") or "1536x1024")
+        video_id = str(payload.get("video") or "").strip() or None
+        try:
+            raw, ext, model, meta = openai_generate_image(prompt, size=size)
+        except RuntimeError as exc:
+            self.send_json({"error": str(exc)}, status=502)
+            return
+
+        cost, estimated = estimate_image_cost(
+            model, size=str(meta.get("size") or size), quality=str(meta.get("quality") or "high")
+        )
+        append_ledger(
+            video_id,
+            provider="openai",
+            model=model,
+            note="Generating an image",
+            cost=cost,
+            estimated=estimated,
+            meta={"size": meta.get("size") or size, "usage": meta.get("usage") or {}},
+        )
+
+        target = safe_asset_write("images", unique_image_filename(stem, ext))
+        if not target:
+            self.send_json({"error": "could not create image file"}, status=400)
+            return
+
+        target.write_bytes(raw)
+        relative = target.relative_to(ROOT).as_posix()
+        self.send_json(
+            {
+                "saved": True,
+                "path": relative,
+                "name": target.stem,
+                "model": model,
+                "cost": cost,
+                "estimated": estimated,
+            }
+        )
+
+    def edit_still(self) -> None:
+        """Claude writes an edit prompt from a crop; optionally OpenAI generates the still."""
+        length = int(self.headers.get("Content-Length", 0))
+        # Base64 crops can be a few MB.
+        if length <= 0 or length > 20 * 1024 * 1024:
+            self.send_json({"error": "missing or oversized JSON body"}, status=400)
+            return
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError as exc:
+            self.send_json({"error": f"invalid JSON: {exc}"}, status=400)
+            return
+
+        step = str(payload.get("step") or "prompt").strip()
+        if step not in {"prompt", "image"}:
+            self.send_json({"error": "step must be prompt or image"}, status=400)
+            return
+
+        if step == "prompt":
+            change = str(payload.get("change") or "").strip()
+            if not change:
+                self.send_json({"error": "change is required"}, status=400)
+                return
+            image_b64 = str(payload.get("image_b64") or "").strip()
+            if not image_b64:
+                self.send_json({"error": "image_b64 is required"}, status=400)
+                return
+            # Allow data-URL prefix.
+            if "," in image_b64 and image_b64.lower().startswith("data:"):
+                image_b64 = image_b64.split(",", 1)[1]
+            media_type = str(payload.get("media_type") or "image/png").strip() or "image/png"
+            jar_to_claude = str(payload.get("jar_to_claude") or "")
+            video_id = str(payload.get("video") or "").strip() or None
+            try:
+                edit_prompt, model, usage = claude_still_edit_prompt(
+                    image_b64, media_type, jar_to_claude, change
+                )
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=502)
+                return
+            cost, estimated = estimate_claude_cost(model, usage)
+            append_ledger(
+                video_id,
+                provider="anthropic",
+                model=model,
+                note="Editing a still",
+                cost=cost,
+                estimated=estimated,
+                meta={"usage": usage, "step": "prompt"},
+            )
+            self.send_json(
+                {
+                    "ok": True,
+                    "step": "prompt",
+                    "edit_prompt": edit_prompt,
+                    "model": model,
+                    "cost": cost,
+                    "estimated": estimated,
+                }
+            )
+            return
+
+        edit_prompt = str(payload.get("edit_prompt") or "").strip()
+        if not edit_prompt:
+            self.send_json({"error": "edit_prompt is required"}, status=400)
+            return
+        image_b64 = str(payload.get("image_b64") or "").strip()
+        if not image_b64:
+            self.send_json({"error": "image_b64 is required for ChatGPT edit"}, status=400)
+            return
+        if "," in image_b64 and image_b64.lower().startswith("data:"):
+            image_b64 = image_b64.split(",", 1)[1]
+        media_type = str(payload.get("media_type") or "image/png").strip() or "image/png"
+        video_id = str(payload.get("video") or "").strip() or None
+        try:
+            image_bytes = base64.b64decode(image_b64, validate=False)
+        except Exception:
+            self.send_json({"error": "invalid image_b64"}, status=400)
+            return
+        if not image_bytes:
+            self.send_json({"error": "empty image"}, status=400)
+            return
+
+        stem = str(payload.get("name") or "").strip() or f"edit-{int(time.time())}"
+        size = str(payload.get("size") or "1536x1024")
+        try:
+            raw, ext, model, meta = openai_edit_image(
+                edit_prompt, image_bytes, media_type=media_type, size=size
+            )
+        except RuntimeError as exc:
+            self.send_json({"error": str(exc)}, status=502)
+            return
+        cost, estimated = estimate_image_cost(
+            model, size=str(meta.get("size") or size), quality=str(meta.get("quality") or "high")
+        )
+        append_ledger(
+            video_id,
+            provider="openai",
+            model=model,
+            note="Editing a still",
+            cost=cost,
+            estimated=estimated,
+            meta={"size": meta.get("size") or size, "usage": meta.get("usage") or {}, "step": "image"},
+        )
+        target = safe_asset_write("images", unique_image_filename(stem, ext))
+        if not target:
+            self.send_json({"error": "could not create image file"}, status=400)
+            return
+        target.write_bytes(raw)
+        relative = target.relative_to(ROOT).as_posix()
+        self.send_json(
+            {
+                "ok": True,
+                "step": "image",
+                "path": relative,
+                "name": target.stem,
+                "model": model,
+                "cost": cost,
+                "estimated": estimated,
+            }
+        )
+
+    def generate_anim(self) -> None:
+        """Claude writes a Veo prompt from a crop; optionally Veo generates the clip."""
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0 or length > 20 * 1024 * 1024:
+            self.send_json({"error": "missing or oversized JSON body"}, status=400)
+            return
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError as exc:
+            self.send_json({"error": f"invalid JSON: {exc}"}, status=400)
+            return
+
+        step = str(payload.get("step") or "prompt").strip()
+        if step not in {"prompt", "video"}:
+            self.send_json({"error": "step must be prompt or video"}, status=400)
+            return
+
+        if step == "prompt":
+            change = str(payload.get("change") or "").strip()
+            if not change:
+                self.send_json({"error": "change is required"}, status=400)
+                return
+            image_b64 = str(payload.get("image_b64") or "").strip()
+            if not image_b64:
+                self.send_json({"error": "image_b64 is required"}, status=400)
+                return
+            if "," in image_b64 and image_b64.lower().startswith("data:"):
+                image_b64 = image_b64.split(",", 1)[1]
+            media_type = str(payload.get("media_type") or "image/png").strip() or "image/png"
+            jar_to_claude = str(payload.get("jar_to_claude") or "")
+            video_id = str(payload.get("video") or "").strip() or None
+            try:
+                veo_prompt, model, usage = claude_veo_prompt(
+                    image_b64, media_type, jar_to_claude, change
+                )
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=502)
+                return
+            cost, estimated = estimate_claude_cost(model, usage)
+            append_ledger(
+                video_id,
+                provider="anthropic",
+                model=model,
+                note="Animating a region",
+                cost=cost,
+                estimated=estimated,
+                meta={"usage": usage, "step": "prompt"},
+            )
+            self.send_json(
+                {
+                    "ok": True,
+                    "step": "prompt",
+                    "veo_prompt": veo_prompt,
+                    "model": model,
+                    "cost": cost,
+                    "estimated": estimated,
+                }
+            )
+            return
+
+        veo_prompt = str(payload.get("veo_prompt") or "").strip()
+        if not veo_prompt:
+            self.send_json({"error": "veo_prompt is required"}, status=400)
+            return
+        image_b64 = str(payload.get("image_b64") or "").strip()
+        if not image_b64:
+            self.send_json({"error": "image_b64 is required for Veo"}, status=400)
+            return
+        if "," in image_b64 and image_b64.lower().startswith("data:"):
+            image_b64 = image_b64.split(",", 1)[1]
+        media_type = str(payload.get("media_type") or "image/png").strip() or "image/png"
+        video_id = str(payload.get("video") or "").strip() or None
+        aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip() or "16:9"
+        duration_seconds = int(payload.get("duration_seconds") or 4)
+        try:
+            image_bytes = base64.b64decode(image_b64, validate=False)
+        except Exception:
+            self.send_json({"error": "invalid image_b64"}, status=400)
+            return
+        if not image_bytes:
+            self.send_json({"error": "empty image"}, status=400)
+            return
+
+        stem = str(payload.get("name") or "").strip() or f"anim-{int(time.time())}"
+        try:
+            raw, ext, model, meta = veo_generate_video(
+                veo_prompt,
+                image_bytes,
+                media_type=media_type,
+                aspect_ratio=aspect_ratio,
+                duration_seconds=duration_seconds,
+            )
+        except RuntimeError as exc:
+            self.send_json({"error": str(exc)}, status=502)
+            return
+        cost, estimated = estimate_veo_cost(
+            model, duration_seconds=int(meta.get("duration_seconds") or duration_seconds)
+        )
+        append_ledger(
+            video_id,
+            provider="google",
+            model=model,
+            note="Generating an animation",
+            cost=cost,
+            estimated=estimated,
+            meta={**meta, "step": "video"},
+        )
+        target = safe_asset_write("animations", unique_asset_filename("animations", stem, ext))
+        if not target:
+            self.send_json({"error": "could not create animation file"}, status=400)
+            return
+        target.write_bytes(raw)
+        relative = target.relative_to(ROOT).as_posix()
+        self.send_json(
+            {
+                "ok": True,
+                "step": "video",
+                "path": relative,
+                "name": target.stem,
+                "model": model,
+                "cost": cost,
+                "estimated": estimated,
+            }
+        )
 
     def upload_asset(self) -> None:
         query = self.query()
@@ -1061,19 +2155,27 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--port", type=int, default=8765)
+    env_port = os.environ.get("PORT")
+    default_port = int(env_port) if env_port and env_port.isdigit() else 8765
+    # Railway (and most PaaS) set PORT and need 0.0.0.0; local stays on loopback.
+    default_host = os.environ.get("HOST") or ("0.0.0.0" if env_port else "127.0.0.1")
+    parser.add_argument("--port", type=int, default=default_port)
+    parser.add_argument("--host", default=default_host, help="bind address (default: 127.0.0.1 locally, 0.0.0.0 when PORT is set)")
     parser.add_argument("--no-open", action="store_true", help="don't open a browser")
     args = parser.parse_args()
+    # Containers / PaaS: never try to launch a local browser.
+    if env_port:
+        args.no_open = True
 
     if not shutil.which("ffprobe"):
         print("error: ffprobe is not installed (brew install ffmpeg)", file=sys.stderr)
         return 1
 
     VIDEOS.mkdir(parents=True, exist_ok=True)
-    address = f"http://127.0.0.1:{args.port}"
+    address = f"http://{args.host}:{args.port}"
 
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE:
             print(
@@ -1089,7 +2191,8 @@ def main() -> int:
         print(f"Videos in {VIDEOS}/")
         print("Ctrl-C to stop.")
         if not args.no_open:
-            threading.Timer(0.5, webbrowser.open, [address]).start()
+            open_url = f"http://127.0.0.1:{args.port}" if args.host in ("0.0.0.0", "::") else address
+            threading.Timer(0.5, webbrowser.open, [open_url]).start()
         try:
             server.serve_forever()
         except KeyboardInterrupt:
