@@ -65,6 +65,8 @@ IMAGE_FLAT_COST_USD = {
     ("gpt-image-2", "high", "1024x1024"): 0.05,
     ("gpt-image-2", "high", "1536x1024"): 0.10,
     ("gpt-image-2", "high", "1024x1536"): 0.10,
+    ("gpt-image-2", "high", "3840x2160"): 0.40,
+    ("gpt-image-2", "high", "2160x3840"): 0.40,
 }
 
 # Flat USD guesstimates for Veo (no dollar amount in API response)
@@ -121,14 +123,59 @@ def estimate_claude_cost(model: str, usage: dict | None) -> tuple[float, bool]:
     return 0.02, True
 
 
-def estimate_image_cost(model: str, size: str = "1536x1024", quality: str = "high") -> tuple[float, bool]:
+def openai_image_model() -> str:
+    return (os.environ.get("OPENAI_IMAGE_MODEL") or "gpt-image-2").strip() or "gpt-image-2"
+
+
+def openai_image_quality() -> str:
+    quality = (os.environ.get("OPENAI_IMAGE_QUALITY") or "high").strip().lower() or "high"
+    return quality if quality in {"low", "medium", "high", "auto"} else "high"
+
+
+def openai_image_size(requested: str | None = None, *, portrait: bool = False) -> str:
+    """Pick a valid size. gpt-image-2 defaults to 4K landscape/portrait."""
+    model = openai_image_model()
+    classic = {"1024x1024", "1536x1024", "1024x1536"}
+    four_k = {"3840x2160", "2160x3840", "2160x2160"}
+    size = (requested or os.environ.get("OPENAI_IMAGE_SIZE") or "").strip()
+    default_4k = "2160x3840" if portrait else "3840x2160"
+    default_hd = "1024x1536" if portrait else "1536x1024"
+
+    if model.startswith("gpt-image-2"):
+        if size in classic | four_k:
+            return size
+        if "x" in size.lower():
+            try:
+                width_s, height_s = size.lower().split("x", 1)
+                width, height = int(width_s), int(height_s)
+                if (
+                    width > 0
+                    and height > 0
+                    and width % 16 == 0
+                    and height % 16 == 0
+                    and max(width, height) <= 3840
+                    and min(width, height) >= 16
+                ):
+                    return f"{width}x{height}"
+            except ValueError:
+                pass
+        return default_4k
+
+    if size in classic:
+        return size
+    return default_hd
+
+
+def estimate_image_cost(model: str, size: str = "3840x2160", quality: str = "high") -> tuple[float, bool]:
     key = (model, quality, size)
     if key in IMAGE_FLAT_COST_USD:
         return IMAGE_FLAT_COST_USD[key], True
     for (mod, qual, sz), price in IMAGE_FLAT_COST_USD.items():
         if model.startswith(mod) and qual == quality and sz == size:
             return price, True
-    # Default landscape high
+    # Default landscape high (4K-ish for image-2)
+    if "3840" in size or "2160" in size:
+        return 0.40, True
     return 0.08, True
 
 
@@ -1009,21 +1056,20 @@ def _openai_image_result(payload: dict) -> tuple[bytes, str]:
 
 
 def openai_generate_image(
-    prompt: str, size: str = "1536x1024"
+    prompt: str, size: str = "3840x2160"
 ) -> tuple[bytes, str, str, dict]:
     """Call OpenAI Images API. Returns (bytes, ext, model, meta)."""
     key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not key:
         raise RuntimeError("OPENAI_API_KEY is not set")
-    model = (os.environ.get("OPENAI_IMAGE_MODEL") or "gpt-image-2").strip() or "gpt-image-2"
-    allowed = {"1024x1024", "1536x1024", "1024x1536"}
-    if size not in allowed:
-        size = "1536x1024"
+    model = openai_image_model()
+    quality = openai_image_quality()
+    size = openai_image_size(size)
     body = {
         "model": model,
         "prompt": prompt,
         "size": size,
-        "quality": "high",
+        "quality": quality,
         "n": 1,
     }
     req = urllib.request.Request(
@@ -1043,7 +1089,7 @@ def openai_generate_image(
     except urllib.error.URLError as exc:
         raise RuntimeError(f"OpenAI request failed: {exc.reason}") from exc
     raw, ext = _openai_image_result(payload)
-    meta = {"size": size, "quality": "high", "usage": payload.get("usage") or {}}
+    meta = {"size": size, "quality": quality, "usage": payload.get("usage") or {}}
     return raw, ext, model, meta
 
 
@@ -1051,16 +1097,15 @@ def openai_edit_image(
     prompt: str,
     image_bytes: bytes,
     media_type: str = "image/png",
-    size: str = "1536x1024",
+    size: str = "3840x2160",
 ) -> tuple[bytes, str, str, dict]:
     """Edit an image with GPT Image. Returns (bytes, ext, model, meta)."""
     key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not key:
         raise RuntimeError("OPENAI_API_KEY is not set")
-    model = (os.environ.get("OPENAI_IMAGE_MODEL") or "gpt-image-2").strip() or "gpt-image-2"
-    allowed = {"1024x1024", "1536x1024", "1024x1536"}
-    if size not in allowed:
-        size = "1536x1024"
+    model = openai_image_model()
+    quality = openai_image_quality()
+    size = openai_image_size(size)
     if media_type not in {"image/png", "image/jpeg", "image/webp"}:
         media_type = "image/png"
     ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(media_type, "png")
@@ -1076,8 +1121,8 @@ def openai_edit_image(
     add_field("model", model)
     add_field("prompt", prompt)
     add_field("size", size)
-    add_field("quality", "high")
-    # gpt-image-2 rejects input_fidelity; older gpt-image models accept it.
+    add_field("quality", quality)
+    # gpt-image-2 rejects input_fidelity; gpt-image-1 / 1.5 accept it.
     if model.startswith("gpt-image") and not model.startswith("gpt-image-2"):
         add_field("input_fidelity", "high")
     chunks.append(f"--{boundary}\r\n".encode())
@@ -1108,7 +1153,7 @@ def openai_edit_image(
     except urllib.error.URLError as exc:
         raise RuntimeError(f"OpenAI request failed: {exc.reason}") from exc
     raw, out_ext = _openai_image_result(payload)
-    meta = {"size": size, "quality": "high", "usage": payload.get("usage") or {}}
+    meta = {"size": size, "quality": quality, "usage": payload.get("usage") or {}}
     return raw, out_ext, model, meta
 
 
@@ -1537,14 +1582,13 @@ class Handler(BaseHTTPRequestHandler):
                         os.environ.get("ANTHROPIC_MODEL") or "claude-opus-5"
                     ).strip()
                     or "claude-opus-5",
-                    "openai_image_model": (
-                        os.environ.get("OPENAI_IMAGE_MODEL") or "gpt-image-2"
-                    ).strip()
-                    or "gpt-image-2",
+                    "openai_image_model": openai_image_model(),
+                    "openai_image_size": openai_image_size(),
+                    "openai_image_quality": openai_image_quality(),
                     "veo_model": (
-                        os.environ.get("VEO_MODEL") or "veo-3.1-generate-preview"
+                        os.environ.get("VEO_MODEL") or "veo-3.1-fast-generate-preview"
                     ).strip()
-                    or "veo-3.1-generate-preview",
+                    or "veo-3.1-fast-generate-preview",
                 }
             )
             return
@@ -1768,7 +1812,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         stem = str(payload.get("name") or "").strip() or f"scene-{int(time.time())}"
-        size = str(payload.get("size") or "1536x1024")
+        size = str(payload.get("size") or openai_image_size())
         video_id = str(payload.get("video") or "").strip() or None
         try:
             raw, ext, model, meta = openai_generate_image(prompt, size=size)
@@ -1891,7 +1935,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         stem = str(payload.get("name") or "").strip() or f"edit-{int(time.time())}"
-        size = str(payload.get("size") or "1536x1024")
+        size = str(payload.get("size") or openai_image_size())
         try:
             raw, ext, model, meta = openai_edit_image(
                 edit_prompt, image_bytes, media_type=media_type, size=size

@@ -1518,7 +1518,7 @@ async function cropSceneRegion(entry) {
   return {
     image_b64,
     media_type: "image/png",
-    size: portrait ? "1024x1536" : "1536x1024",
+    size: portrait ? "2160x3840" : "3840x2160",
     aspect_ratio: portrait ? "9:16" : "16:9",
   };
 }
@@ -1598,13 +1598,58 @@ function stillGenStep(label, { active = false, done = false } = {}) {
   );
 }
 
-function stillGenFieldLabel(text, model = "") {
+function stillGenFieldLabel(text, model = "", { muted = true } = {}) {
   return h(
     "div",
     { class: "still-gen-label-row" },
-    h("span", { class: "still-gen-label muted", text }),
+    h("span", { class: `still-gen-label${muted ? " muted" : ""}`, text }),
     model && h("span", { class: "still-gen-model", text: model, title: model })
   );
+}
+
+function stillGenCopyButton() {
+  return h(
+    "button",
+    {
+      class: "btn ghost still-gen-copy",
+      type: "button",
+      title: "Copy prompt",
+      "aria-label": "Copy prompt",
+      onClick: async (event) => {
+        event.stopPropagation();
+        const field = event.currentTarget.closest(".still-gen-field");
+        const text = field?.querySelector("textarea")?.value || "";
+        const btn = event.currentTarget;
+        try {
+          await navigator.clipboard.writeText(text);
+          btn.textContent = "Copied";
+          setTimeout(() => {
+            if (btn.isConnected) btn.textContent = "Copy";
+          }, 1200);
+        } catch {
+          state.note = "Could not copy";
+          render();
+        }
+      },
+    },
+    "Copy"
+  );
+}
+
+function stillGenPromptField(label, textareaProps = {}, { model = "", muted = true } = {}) {
+  const { class: extraClass = "", ...rest } = textareaProps;
+  return [
+    stillGenFieldLabel(label, model, { muted }),
+    h(
+      "div",
+      { class: "still-gen-field" },
+      stillGenCopyButton(),
+      h("textarea", {
+        ...rest,
+        class: `brief-input ${extraClass}`.trim(),
+      })
+    ),
+  ];
 }
 
 function beginEditPanelDrag(event, kind = "still") {
@@ -8751,51 +8796,57 @@ function stillSlotDial(entry, index) {
           patchStillGen({ useClaude: !useClaude });
         },
       }),
-      h("p", {
-        class: "still-gen-label",
-        text: "What would you like to change?",
-      }),
-      h("textarea", {
-        class: "brief-input still-gen-change",
-        rows: 3,
-        value: change,
-        placeholder: "e.g. add a steaming mug on the table",
-        disabled: busy,
-        onInput: (event) => {
-          const next = event.target.value;
-          const jar = composeJarToClaude(next);
-          patchStillGen({ change: next, jarToClaude: jar, error: "" }, { redraw: false });
-          const root = event.target.closest(".still-gen");
-          const jarEl = root?.querySelector(".still-gen-jar");
-          if (jarEl) jarEl.value = jar;
-          const err = root?.querySelector(".still-gen-error");
-          if (err) err.remove();
+      ...stillGenPromptField(
+        "What would you like to change?",
+        {
+          class: "still-gen-change",
+          rows: 3,
+          value: change,
+          placeholder: "e.g. add a steaming mug on the table",
+          disabled: busy,
+          onInput: (event) => {
+            const next = event.target.value;
+            const jar = composeJarToClaude(next);
+            patchStillGen({ change: next, jarToClaude: jar, error: "" }, { redraw: false });
+            const root = event.target.closest(".still-gen");
+            const jarEl = root?.querySelector(".still-gen-jar");
+            if (jarEl) jarEl.value = jar;
+            const err = root?.querySelector(".still-gen-error");
+            if (err) err.remove();
+          },
         },
-      }),
-      stillGenFieldLabel("Wonderjar → Claude", state.models?.anthropic || ""),
-      h("textarea", {
-        class: "brief-input still-gen-jar",
-        rows: 2,
-        value: jarToClaude,
-        disabled: busy || !useClaude,
-        "aria-label": "Wonderjar to Claude prompt",
-        onInput: (event) => {
-          patchStillGen({ jarToClaude: event.target.value }, { redraw: false });
+        { muted: false }
+      ),
+      ...stillGenPromptField(
+        "Wonderjar → Claude",
+        {
+          class: "still-gen-jar",
+          rows: 2,
+          value: jarToClaude,
+          disabled: busy || !useClaude,
+          "aria-label": "Wonderjar to Claude prompt",
+          onInput: (event) => {
+            patchStillGen({ jarToClaude: event.target.value }, { redraw: false });
+          },
         },
-      }),
-      stillGenFieldLabel("Claude → ChatGPT", state.models?.openaiImage || ""),
-      h("textarea", {
-        class: "brief-input still-gen-claude is-editable",
-        rows: 6,
-        value: editPrompt,
-        disabled: busy,
-        "aria-label": "Claude to ChatGPT prompt",
-        title: "Editable — paste your own prompt to skip Claude, or let Claude fill this",
-        placeholder: "Claude’s ChatGPT prompt will show here — or paste your own…",
-        onInput: (event) => {
-          patchStillGen({ editPrompt: event.target.value, error: "" }, { redraw: false });
+        { model: state.models?.anthropic || "" }
+      ),
+      ...stillGenPromptField(
+        "Claude → ChatGPT",
+        {
+          class: "still-gen-claude is-editable",
+          rows: 6,
+          value: editPrompt,
+          disabled: busy,
+          "aria-label": "Claude to ChatGPT prompt",
+          title: "Editable — paste your own prompt to skip Claude, or let Claude fill this",
+          placeholder: "Claude’s ChatGPT prompt will show here — or paste your own…",
+          onInput: (event) => {
+            patchStillGen({ editPrompt: event.target.value, error: "" }, { redraw: false });
+          },
         },
-      }),
+        { model: state.models?.openaiImage || "" }
+      ),
       h(
         "label",
         { class: `anim-check${entry.soft_edges ? " on" : ""}` },
@@ -8961,46 +9012,52 @@ function animSlotDial(entry, index) {
           patchAnimGen({ useClaude: !useClaude });
         },
       }),
-      h("p", {
-        class: "still-gen-label",
-        text: "What should move in this region?",
-      }),
-      h("textarea", {
-        class: "brief-input still-gen-change anim-gen-change",
-        rows: 3,
-        value: change,
-        placeholder: "e.g. only the candle flame flickers; everything else stays frozen",
-        disabled: busy,
-        onInput: (event) => {
-          patchAnimGen({ change: event.target.value, error: "" }, { redraw: false });
-          const err = event.target.closest(".anim-gen")?.querySelector(".still-gen-error");
-          if (err) err.remove();
+      ...stillGenPromptField(
+        "What should move in this region?",
+        {
+          class: "still-gen-change anim-gen-change",
+          rows: 3,
+          value: change,
+          placeholder: "e.g. only the candle flame flickers; everything else stays frozen",
+          disabled: busy,
+          onInput: (event) => {
+            patchAnimGen({ change: event.target.value, error: "" }, { redraw: false });
+            const err = event.target.closest(".anim-gen")?.querySelector(".still-gen-error");
+            if (err) err.remove();
+          },
         },
-      }),
-      stillGenFieldLabel("Wonderjar → Claude", state.models?.anthropic || ""),
-      h("textarea", {
-        class: "brief-input still-gen-jar anim-gen-jar",
-        rows: 3,
-        value: jarToClaude,
-        disabled: busy || !useClaude,
-        "aria-label": "Wonderjar to Claude Veo prompt",
-        onInput: (event) => {
-          patchAnimGen({ jarToClaude: event.target.value }, { redraw: false });
+        { muted: false }
+      ),
+      ...stillGenPromptField(
+        "Wonderjar → Claude",
+        {
+          class: "still-gen-jar anim-gen-jar",
+          rows: 3,
+          value: jarToClaude,
+          disabled: busy || !useClaude,
+          "aria-label": "Wonderjar to Claude Veo prompt",
+          onInput: (event) => {
+            patchAnimGen({ jarToClaude: event.target.value }, { redraw: false });
+          },
         },
-      }),
-      stillGenFieldLabel("Claude → Veo", state.models?.veo || ""),
-      h("textarea", {
-        class: "brief-input still-gen-claude anim-gen-claude is-editable",
-        rows: 6,
-        value: veoPrompt,
-        disabled: busy,
-        "aria-label": "Claude to Veo prompt",
-        title: "Editable — paste your own prompt to skip Claude, or let Claude fill this",
-        placeholder: "Claude’s Veo prompt will show here — or paste your own…",
-        onInput: (event) => {
-          patchAnimGen({ veoPrompt: event.target.value, error: "" }, { redraw: false });
+        { model: state.models?.anthropic || "" }
+      ),
+      ...stillGenPromptField(
+        "Claude → Veo",
+        {
+          class: "still-gen-claude anim-gen-claude is-editable",
+          rows: 6,
+          value: veoPrompt,
+          disabled: busy,
+          "aria-label": "Claude to Veo prompt",
+          title: "Editable — paste your own prompt to skip Claude, or let Claude fill this",
+          placeholder: "Claude’s Veo prompt will show here — or paste your own…",
+          onInput: (event) => {
+            patchAnimGen({ veoPrompt: event.target.value, error: "" }, { redraw: false });
+          },
         },
-      }),
+        { model: state.models?.veo || "" }
+      ),
       h(
         "label",
         { class: `anim-check${entry.soft_edges ? " on" : ""}` },

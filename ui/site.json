@@ -1,14 +1,14 @@
 {
   "landing": {
     "brand": "Wonderjar",
-    "title": "Build a world worth staying in.",
+    "title": "Build a world that pulls you in.",
     "description": "Build it. Light it. Share it.",
     "cta": "Enter Riverbend",
     "href": "/video?v=riverbend",
     "videoId": "riverbend",
     "secondary": "or build your own",
     "secondaryHref": "/videos",
-    "video": "/assets/videos/landing-loop.mp4?v=2",
-    "poster": "/assets/videos/landing-poster.jpg?v=2"
+    "video": "/assets/videos/landing-loop.mp4?v=3",
+    "poster": "/assets/videos/landing-poster.jpg?v=3"
   }
 }

@@ -3129,6 +3129,33 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+.still-gen-field {
+  position: relative;
+}
+
+.still-gen-field .still-gen-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  min-height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06);
+}
+
+.still-gen-field .still-gen-copy:hover {
+  color: var(--ink);
+  background: #fff;
+}
+
+.still-gen-field textarea {
+  padding-right: 58px;
+}
+
 .still-gen-drag {
   display: flex;
   align-items: center;
