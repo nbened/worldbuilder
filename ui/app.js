@@ -100,6 +100,8 @@ const state = {
     music: false,
     sounds: false,
   },
+  /** In-app confirm: { title, message, confirmLabel, cancelLabel, resolve } */
+  confirm: null,
 };
 
 let drag = null;
@@ -155,6 +157,122 @@ const songMeta = (path) => state.assets.music.find((song) => song.path === path)
 const soundMeta = (path) => state.assets.sounds.find((sound) => sound.path === path);
 const imageExists = (path) => state.assets.images.some((image) => image.path === path);
 const withVideo = (path) => `${path}${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(state.videoId)}`;
+
+function askConfirm({
+  title,
+  message,
+  confirmLabel = "Delete",
+  cancelLabel = "Cancel",
+} = {}) {
+  closeConfirm(false);
+  return new Promise((resolve) => {
+    state.confirm = { title, message, confirmLabel, cancelLabel, resolve };
+    render();
+  });
+}
+
+function askName({
+  title,
+  message,
+  confirmLabel = "Add",
+  cancelLabel = "Cancel",
+  placeholder = "Name",
+} = {}) {
+  closeConfirm(false);
+  return new Promise((resolve) => {
+    state.confirm = {
+      title,
+      message,
+      confirmLabel,
+      cancelLabel,
+      prompt: true,
+      placeholder,
+      resolve,
+    };
+    render();
+  });
+}
+
+function closeConfirm(ok) {
+  const box = state.confirm;
+  if (!box) return;
+  const input = document.querySelector(".confirm-prompt");
+  const typed = input ? String(input.value || "").trim() : "";
+  state.confirm = null;
+  render();
+  if (box.prompt) box.resolve(ok ? typed : null);
+  else box.resolve(!!ok);
+}
+
+function confirmBoxView() {
+  const box = state.confirm;
+  if (!box) return null;
+  const cancelBtn = h(
+    "button",
+    {
+      class: "btn ghost",
+      type: "button",
+      onClick: () => closeConfirm(false),
+      text: box.cancelLabel || "Cancel",
+    }
+  );
+  const input = box.prompt
+    ? h("input", {
+        id: "confirm-prompt",
+        class: "confirm-prompt",
+        type: "text",
+        placeholder: box.placeholder || "Name",
+        "aria-label": box.placeholder || "Name",
+        autocomplete: "off",
+        onKeydown: (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            closeConfirm(true);
+          }
+        },
+      })
+    : null;
+  requestAnimationFrame(() => {
+    if (document.activeElement?.closest(".confirm-box")) return;
+    if (input) input.focus();
+    else cancelBtn.focus();
+  });
+  return h(
+    "div",
+    {
+      class: "confirm-scrim",
+      role: "presentation",
+      onClick: (event) => {
+        if (event.target === event.currentTarget) closeConfirm(false);
+      },
+    },
+    h(
+      "div",
+      {
+        class: "confirm-box",
+        role: box.prompt ? "dialog" : "alertdialog",
+        "aria-modal": "true",
+        "aria-labelledby": "confirm-title",
+        "aria-describedby": box.message ? "confirm-message" : undefined,
+      },
+      h("h2", { id: "confirm-title", class: "confirm-title", text: box.title }),
+      box.message &&
+        h("p", { id: "confirm-message", class: "confirm-message", text: box.message }),
+      input,
+      h(
+        "div",
+        { class: "confirm-actions" },
+        cancelBtn,
+        h("button", {
+          class: box.prompt ? "btn primary" : "btn stop",
+          type: "button",
+          onClick: () => closeConfirm(true),
+          text: box.confirmLabel || (box.prompt ? "Add" : "Delete"),
+        })
+      )
+    )
+  );
+}
 
 function trashIcon() {
   return h(
@@ -4795,7 +4913,7 @@ function breadcrumbs() {
     crumbs.push(h("span", { class: "sep", text: "/" }));
     crumbs.push(
       h("a", {
-        class: "crumb",
+        class: "crumb crumb-video",
         href: withJarParam(`/video?v=${encodeURIComponent(state.videoId)}`),
         onClick: (event) => {
           event.preventDefault();
@@ -5117,7 +5235,8 @@ function render() {
             ? sceneView()
             : videoView();
   const panel = processPanelView();
-  app.replaceChildren(...[view, panel].filter(Boolean));
+  const confirm = confirmBoxView();
+  app.replaceChildren(...[view, panel, confirm].filter(Boolean));
 
   restoreScroll(savedScroll);
   // Layout can settle after the first paint; restore again so we don't jump to top.
@@ -5310,11 +5429,28 @@ function jarsView() {
     h(
       "div",
       { class: "video-page jars-page" },
-      h("h1", { class: "page-title", text: "Jars" }),
-      h("p", {
-        class: "page-blurb",
-        text: "Worlds you can build in — each jar holds videos, scenes, and shared rules.",
-      }),
+      h(
+        "div",
+        { class: "page-head" },
+        h(
+          "div",
+          {},
+          h("h1", { class: "page-title", text: "Jars" }),
+          h("p", {
+            class: "page-blurb",
+            text: "Worlds you can build in — each jar holds videos, scenes, and shared rules.",
+          })
+        ),
+        h(
+          "button",
+          {
+            class: "btn primary",
+            type: "button",
+            onClick: () => requestCreateJar(),
+          },
+          "+  Add jar"
+        )
+      ),
       h(
         "div",
         { class: "jar-grid" },
@@ -5360,7 +5496,7 @@ function jarsView() {
             )
           : h("p", {
               class: "empty-note",
-              text: "No jars yet — add a JSON file to jars/",
+              text: "No jars yet — add one to get started.",
             })
       )
     )
@@ -5437,39 +5573,70 @@ function jarView() {
           })
         )
       ),
-      h("h2", { class: "jar-section-title", text: "Videos" }),
+      h(
+        "div",
+        { class: "jar-section-head" },
+        h("h2", { class: "jar-section-title", text: "Videos" }),
+        h(
+          "button",
+          {
+            class: "btn ghost",
+            type: "button",
+            onClick: () => requestCreateVideo(),
+          },
+          "+  Add video"
+        )
+      ),
       h(
         "div",
         { class: "video-list" },
         state.videos.length
           ? state.videos.map((video) =>
               h(
-                "button",
-                {
-                  class: "video-row",
-                  type: "button",
-                  onClick: () =>
-                    go("video", { videoId: video.id, jarId: state.jarId }),
-                },
-                h("div", {
-                  class: `video-thumb${video.thumb ? "" : " blank"}`,
-                  style: mediaThumbStyle(video.thumb),
-                }),
+                "div",
+                { class: "video-row" },
                 h(
-                  "div",
-                  { class: "video-meta" },
-                  h("span", { class: "name", text: video.title }),
-                  h("span", {
-                    class: "len",
-                    text: `${video.scenes} scene${video.scenes === 1 ? "" : "s"} · ${clock(video.duration)}`,
-                  })
+                  "button",
+                  {
+                    class: "video-row-main",
+                    type: "button",
+                    onClick: () =>
+                      go("video", { videoId: video.id, jarId: state.jarId }),
+                  },
+                  h("div", {
+                    class: `video-thumb${video.thumb ? "" : " blank"}`,
+                    style: mediaThumbStyle(video.thumb),
+                  }),
+                  h(
+                    "div",
+                    { class: "video-meta" },
+                    h("span", { class: "name", text: video.title }),
+                    h("span", {
+                      class: "len",
+                      text: `${video.scenes} scene${video.scenes === 1 ? "" : "s"} · ${clock(video.duration)}`,
+                    })
+                  ),
+                  videoOutputSummary(video)
                 ),
-                videoOutputSummary(video)
+                h(
+                  "button",
+                  {
+                    class: "trash",
+                    type: "button",
+                    title: "Delete video",
+                    "aria-label": `Delete ${video.title || video.id}`,
+                    onClick: (event) => {
+                      event.stopPropagation();
+                      requestDeleteVideo(video);
+                    },
+                  },
+                  trashIcon()
+                )
               )
             )
           : h("p", {
               class: "empty-note",
-              text: "No videos in this jar yet — add ids to jars/<id>.json → videos.",
+              text: "No videos in this jar yet — add one to get started.",
             })
       )
     )
@@ -5970,9 +6137,37 @@ function videoView() {
         h(
           "div",
           { class: "page-title-row" },
-          h("h1", { class: "page-title", text: state.script.project || state.videoId }),
+          h("input", {
+            class: "page-title video-title",
+            type: "text",
+            value: state.script.project || "",
+            placeholder: "Video title",
+            "aria-label": "Video title",
+            onInput: (event) => {
+              state.script.project = event.target.value;
+              clearTimeout(saveTimer);
+              saveTimer = setTimeout(save, 400);
+              const crumb = document.querySelector(".crumb-video");
+              if (crumb) crumb.textContent = event.target.value || state.videoId;
+            },
+          }),
           outputTag(state.outputs?.video),
-          ledgerButton()
+          ledgerButton(),
+          h(
+            "button",
+            {
+              class: "btn ghost icon-btn",
+              type: "button",
+              title: "Delete video",
+              "aria-label": "Delete video",
+              onClick: () =>
+                requestDeleteVideo({
+                  id: state.videoId,
+                  title: state.script.project || state.videoId,
+                }),
+            },
+            trashIcon()
+          )
         ),
         h("p", {
           class: "page-blurb",
@@ -6364,6 +6559,23 @@ function removeTransitionAt(index) {
 }
 
 /** Delete a transition template and every linked variant (pool trash). */
+async function requestDeleteTransition(index, item, variants) {
+  if (variants > 0) {
+    const name = (item.title || "this transition").trim() || "this transition";
+    const ok = await askConfirm({
+      title: "Delete transition?",
+      message:
+        variants > 1
+          ? `“${name}” and its ${variants} variants will be removed.`
+          : `“${name}” will be removed.`,
+      confirmLabel: "Delete transition",
+    });
+    if (!ok) return;
+  }
+  deleteTransitionTemplate(index);
+}
+
+/** Delete a transition template and every linked variant (pool trash). */
 function deleteTransitionTemplate(index) {
   const list = scenes();
   const entry = list[index];
@@ -6494,6 +6706,114 @@ function transitionGap(gap) {
   );
 }
 
+async function requestRemoveScene(index) {
+  const list = scenes();
+  const entry = list[index];
+  if (!entry || entry.is_transition) return;
+  if (list.filter((scene) => !scene.is_transition).length <= 1) {
+    state.note = "Keep at least one scene";
+    render();
+    return;
+  }
+  const name = (entry.title || "").trim() || `Scene ${index + 1}`;
+  const ok = await askConfirm({
+    title: "Delete scene?",
+    message: `“${name}” will be removed from this video.`,
+    confirmLabel: "Delete scene",
+  });
+  if (!ok) return;
+  const i = scenes().indexOf(entry);
+  if (i < 0) return;
+  if (scenes().filter((scene) => !scene.is_transition).length <= 1) {
+    state.note = "Keep at least one scene";
+    render();
+    return;
+  }
+  scenes().splice(i, 1);
+  if (state.sceneIndex >= scenes().length) state.sceneIndex = Math.max(0, scenes().length - 1);
+  state.movingScene = null;
+  state.placingTransition = null;
+  changed();
+}
+
+async function requestCreateJar() {
+  const title = await askName({
+    title: "New jar",
+    message: "Name this world. You can fill in rules and prompts after.",
+    confirmLabel: "Add jar",
+    placeholder: "Jar name",
+  });
+  if (!title) return;
+  try {
+    const response = await fetch("/api/jar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Could not add jar");
+    go("jar", { jarId: data.id });
+  } catch (error) {
+    state.note = error.message || "Could not add jar";
+    render();
+  }
+}
+
+async function requestCreateVideo() {
+  const jarId = state.jarId;
+  if (!jarId) return;
+  const title = await askName({
+    title: "New video",
+    message: "Name this video. It starts with one empty scene.",
+    confirmLabel: "Add video",
+    placeholder: "Video name",
+  });
+  if (!title) return;
+  try {
+    const response = await fetch("/api/video", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, jar: jarId }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Could not add video");
+    go("video", { videoId: data.id, jarId });
+  } catch (error) {
+    state.note = error.message || "Could not add video";
+    render();
+  }
+}
+
+async function requestDeleteVideo(video) {
+  const id = video?.id;
+  if (!id) return;
+  const name = (video.title || id).trim() || id;
+  const ok = await askConfirm({
+    title: "Delete video?",
+    message: `“${name}” will be removed. Pictures and songs in the library stay.`,
+    confirmLabel: "Delete video",
+  });
+  if (!ok) return;
+  try {
+    const response = await fetch(`/api/video?v=${encodeURIComponent(id)}`, { method: "DELETE" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Could not delete video");
+  } catch (error) {
+    state.note = error.message || "Could not delete video";
+    render();
+    return;
+  }
+  const jarId = state.jarId;
+  if (state.videoId === id) {
+    if (jarId) go("jar", { jarId });
+    else go("jars");
+    return;
+  }
+  if (jarId) await loadJar(jarId, { soft: true });
+  else await loadVideos();
+  render();
+}
+
 function sceneCard(index, item) {
   const moving = state.movingScene;
   const placingScene = moving !== null;
@@ -6557,16 +6877,7 @@ function sceneCard(index, item) {
         title: "Remove scene",
         onClick: (event) => {
           event.stopPropagation();
-          if (scenes().filter((scene) => !scene.is_transition).length <= 1) {
-            state.note = "Keep at least one scene";
-            render();
-            return;
-          }
-          scenes().splice(index, 1);
-          if (state.sceneIndex >= scenes().length) state.sceneIndex = Math.max(0, scenes().length - 1);
-          state.movingScene = null;
-          state.placingTransition = null;
-          changed();
+          requestRemoveScene(index);
         },
       },
       trashIcon()
@@ -6628,17 +6939,7 @@ function transitionCard(index, item) {
           : "Delete transition",
         onClick: (event) => {
           event.stopPropagation();
-          if (
-            variants > 0 &&
-            !confirm(
-              variants > 1
-                ? `Delete “${item.title}” and its ${variants} variants?`
-                : `Delete “${item.title}”?`
-            )
-          ) {
-            return;
-          }
-          deleteTransitionTemplate(index);
+          requestDeleteTransition(index, item, variants);
         },
       },
       trashIcon()
@@ -10401,6 +10702,11 @@ window.addEventListener("keydown", (event) => {
     save();
   }
   if (event.key === "Escape") {
+    if (state.confirm) {
+      event.preventDefault();
+      closeConfirm(false);
+      return;
+    }
     if (state.ledger?.open) {
       state.ledger = { ...state.ledger, open: false };
       render();

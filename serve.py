@@ -591,6 +591,127 @@ def load_jar(path: Path) -> dict:
         return json.load(handle)
 
 
+def write_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+
+
+def slug_id(title: str, fallback: str = "untitled") -> str:
+    text = re.sub(r"[^A-Za-z0-9]+", "-", (title or "").strip()).strip("-").lower()
+    text = re.sub(r"-{2,}", "-", text)[:48].strip("-")
+    return text or fallback
+
+
+def unique_stem(directory: Path, base: str) -> str:
+    candidate = base
+    n = 2
+    while (directory / f"{candidate}.json").exists():
+        candidate = f"{base}-{n}"
+        n += 1
+    return candidate
+
+
+def create_jar(title: str) -> dict | None:
+    title = (title or "").strip()
+    if not title:
+        return None
+    JARS.mkdir(parents=True, exist_ok=True)
+    jar_id = unique_stem(JARS, slug_id(title, "jar"))
+    path = jar_file(jar_id)
+    if not path:
+        return None
+    jar = {
+        "title": title,
+        "descriptor": "world",
+        "summary": "",
+        "rules": "",
+        "prompt": "",
+        "thumb": "",
+        "hero": "",
+        "videos": [],
+    }
+    write_json(path, jar)
+    return {"id": jar_id, "jar": jar}
+
+
+def attach_video_to_jar(jar_id: str, video_id: str) -> None:
+    path = jar_file(jar_id)
+    if not path or not path.exists():
+        return
+    jar = load_jar(path)
+    videos = [str(v) for v in (jar.get("videos") or []) if v]
+    if video_id not in videos:
+        videos.append(video_id)
+        jar["videos"] = videos
+        write_json(path, jar)
+
+
+def create_video(title: str, jar_id: str | None = None) -> dict | None:
+    title = (title or "").strip()
+    if not title:
+        return None
+    VIDEOS.mkdir(parents=True, exist_ok=True)
+    video_id = unique_stem(VIDEOS, slug_id(title, "video"))
+    path = video_file(video_id)
+    if not path:
+        return None
+    script = {
+        "project": title,
+        "jar": jar_id or "",
+        "output": {
+            "file": f"out/{video_id}.mp4",
+            "width": 1620,
+            "height": 1080,
+            "fps": 30,
+        },
+        "defaults": {
+            "fade_seconds": 3,
+            "track_crossfade": 2,
+            "open_close_fade": 2,
+            "map_seconds": 30,
+        },
+        "scenes": [
+            {
+                "title": "Scene 1",
+                "image": "",
+                "map": {"seconds": 30},
+                "pan": "none",
+                "zoom": 1,
+                "tracks": [],
+                "sounds": [],
+                "effects": [],
+                "animations": [],
+                "is_transition": False,
+                "transition_in": "fade",
+                "transition_out": "fade",
+                "fade_zoom": None,
+                "image_prompt": "",
+                "music_prompt": "",
+            }
+        ],
+    }
+    write_json(path, script)
+    if jar_id:
+        attach_video_to_jar(jar_id, video_id)
+    return {"id": video_id, "script": script}
+
+
+def delete_video(video_id: str) -> bool:
+    path = video_file(video_id)
+    if not path or not path.exists():
+        return False
+    JARS.mkdir(parents=True, exist_ok=True)
+    for jar_path in JARS.glob("*.json"):
+        jar = load_jar(jar_path)
+        videos = [str(v) for v in (jar.get("videos") or []) if v]
+        if video_id not in videos:
+            continue
+        jar["videos"] = [vid for vid in videos if vid != video_id]
+        write_json(jar_path, jar)
+    path.with_suffix(".json.bak").unlink(missing_ok=True)
+    path.unlink()
+    return True
+
+
 def video_catalog_entry(path: Path) -> dict:
     script = load_script(path)
     scenes = script.get("scenes", [])
@@ -1760,6 +1881,41 @@ class Handler(BaseHTTPRequestHandler):
             stopped = render.stop()
             self.send_json(render.snapshot(), status=200 if stopped else 409)
             return
+        if route == "/api/jar":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                payload = json.loads(self.rfile.read(length)) if length else {}
+            except json.JSONDecodeError as exc:
+                self.send_json({"error": f"invalid JSON: {exc}"}, status=400)
+                return
+            created = create_jar(str(payload.get("title") or ""))
+            if not created:
+                self.send_json({"error": "name this jar"}, status=400)
+                return
+            self.send_json(created)
+            return
+        if route == "/api/video":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                payload = json.loads(self.rfile.read(length)) if length else {}
+            except json.JSONDecodeError as exc:
+                self.send_json({"error": f"invalid JSON: {exc}"}, status=400)
+                return
+            jar_id = str(payload.get("jar") or "").strip()
+            if jar_id and not jar_file(jar_id):
+                self.send_json({"error": "unknown jar"}, status=400)
+                return
+            if jar_id:
+                path = jar_file(jar_id)
+                if not path or not path.exists():
+                    self.send_json({"error": "unknown jar"}, status=404)
+                    return
+            created = create_video(str(payload.get("title") or ""), jar_id or None)
+            if not created:
+                self.send_json({"error": "name this video"}, status=400)
+                return
+            self.send_json(created)
+            return
         if route != "/api/render":
             self.send_error(404)
             return
@@ -2153,7 +2309,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"renamed": True, "path": new_rel, "name": target.stem, "from": old_rel})
 
     def do_DELETE(self) -> None:
-        if urlparse(self.path).path != "/api/asset":
+        route = urlparse(self.path).path
+        if route == "/api/video":
+            required = self.require_video()
+            if not required:
+                return
+            video_id, _ = required
+            if not delete_video(video_id):
+                self.send_json({"error": "unknown video"}, status=404)
+                return
+            self.send_json({"deleted": True, "id": video_id})
+            return
+        if route != "/api/asset":
             self.send_error(404)
             return
         relative = (self.query().get("path") or [""])[0]

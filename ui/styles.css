@@ -677,19 +677,54 @@ button {
 .video-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 4px;
   width: 100%;
-  padding: 8px;
-  border: none;
+  padding: 4px 4px 4px 8px;
   border-radius: 8px;
-  background: none;
-  text-align: left;
-  cursor: pointer;
   transition: background 150ms ease;
 }
 
 .video-row:hover {
   background: var(--hover);
+}
+
+.video-row-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.video-row .trash {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.video-row:hover .trash,
+.video-row:focus-within .trash {
+  opacity: 1;
+}
+
+.video-row .trash:hover {
+  color: var(--fail);
+  background: var(--fail-wash);
 }
 
 .video-thumb {
@@ -901,8 +936,16 @@ button {
   white-space: pre-wrap;
 }
 
-.jar-section-title {
+.jar-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin: 0 0 8px;
+}
+
+.jar-section-title {
+  margin: 0;
   font-size: 15px;
   font-weight: 600;
 }
@@ -952,6 +995,22 @@ button {
   opacity: 0.35;
 }
 
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 8px;
+}
+
+.page-head .page-title {
+  margin: 0 0 4px;
+}
+
+.page-head .page-blurb {
+  margin: 0;
+}
+
 .page-title-row {
   display: flex;
   align-items: center;
@@ -962,6 +1021,27 @@ button {
 
 .page-title-row .page-title {
   margin: 0;
+}
+
+.page-title.video-title {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.25px;
+  color: var(--ink);
+}
+
+.page-title.video-title:focus {
+  outline: none;
+}
+
+.page-title.video-title::placeholder {
+  color: var(--faint);
 }
 
 .page-title {
@@ -4857,4 +4937,63 @@ button {
   .landing-sound:hover {
     transform: none;
   }
+}
+
+.confirm-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(55, 53, 47, 0.28);
+}
+
+.confirm-box {
+  width: min(420px, 100%);
+  padding: 20px 20px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: var(--shadow-popover);
+}
+
+.confirm-title {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.confirm-message {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.confirm-prompt {
+  width: 100%;
+  box-sizing: border-box;
+  margin: -4px 0 16px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--soft);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+
+.confirm-prompt:focus {
+  outline: none;
+  border-color: var(--link);
+  background: #fff;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }

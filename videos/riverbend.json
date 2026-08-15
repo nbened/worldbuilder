@@ -343,53 +343,6 @@
       "id": "t_h6iax3g5",
       "edits": [],
       "fade_seconds": 2
-    },
-    {
-      "title": "Scene 8",
-      "image": "assets/images/riverbend-coffee.png",
-      "map": {
-        "seconds": 30
-      },
-      "pan": "none",
-      "zoom": 1,
-      "tracks": [],
-      "sounds": [],
-      "effects": [],
-      "animations": [
-        {
-          "file": "assets/animations/riverbend-coffee-loop-2.mp4",
-          "x": 0.5860758685286104,
-          "y": 0.0002554523102468308,
-          "w": 0.4139241314713896,
-          "h": 0.349248485928985,
-          "brightness": 100,
-          "saturation": 100,
-          "speed": 45,
-          "aspect": "landscape",
-          "soft_edges": true,
-          "locked": true,
-          "loop_in": null,
-          "loop_out": 2.45
-        }
-      ],
-      "is_transition": false,
-      "transition_in": "fade",
-      "transition_out": "fade",
-      "fade_zoom": null,
-      "image_prompt": "a cafe ",
-      "music_prompt": "",
-      "edits": [
-        {
-          "file": "assets/images/riverbend-coffee-edit-1786602667059.png",
-          "x": 0.26811563351498635,
-          "y": 0.3191557301146342,
-          "w": 0.22637805286207113,
-          "h": 0.19100648210237253,
-          "aspect": "landscape",
-          "soft_edges": true,
-          "locked": true
-        }
-      ]
     }
   ],
   "overlays": {
