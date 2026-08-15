@@ -335,6 +335,21 @@ def probe_video_size(path: Path) -> tuple[int, int] | None:
     return width, height
 
 
+SHORT_BRAND_PNG = UI / "short-brand.png"
+SHORT_BRAND_VERSION = 2
+SHORT_W, SHORT_H = 1080, 1920
+
+
+def short_brand_overlay() -> Path:
+    """Full-frame transparent PNG: Fraunces wordmark at the bottom of the 9:16 frame."""
+    if SHORT_BRAND_PNG.exists():
+        return SHORT_BRAND_PNG
+    cache = ROOT / ".cache" / f"short-brand-v{SHORT_BRAND_VERSION}.png"
+    if cache.exists():
+        return cache
+    raise RuntimeError("missing ui/short-brand.png")
+
+
 def make_scene_short(
     source: Path,
     target: Path,
@@ -343,7 +358,7 @@ def make_scene_short(
     start: float = 0.0,
     duration: float | None = None,
 ) -> Path:
-    """Crop a landscape scene clip to 9:16 (cx-anchored), trim, and scale to 1080×1920."""
+    """Clip the processed scene MP4 to the 9:16 window, then stamp Wonderjar on top."""
     size = probe_video_size(source)
     if not size:
         raise RuntimeError("could not read scene video size")
@@ -392,6 +407,7 @@ def make_scene_short(
                                 )
                             )
                             and saved.get("crop") == [crop_w, crop_h, x, y]
+                            and saved.get("brand") == SHORT_BRAND_VERSION
                         ):
                             return target
                     except (OSError, json.JSONDecodeError, TypeError, ValueError):
@@ -399,19 +415,25 @@ def make_scene_short(
         except OSError:
             pass
 
+    brand = short_brand_overlay()
     vf = (
-        f"crop={crop_w}:{crop_h}:{x}:{y},"
-        f"scale=1080:1920:flags=lanczos,setsar=1,format=yuv420p"
+        f"[0:v]crop={crop_w}:{crop_h}:{x}:{y},"
+        f"scale={SHORT_W}:{SHORT_H}:flags=lanczos,setsar=1[v];"
+        f"[v][1:v]overlay=0:0:format=auto:shortest=1,format=yuv420p[outv]"
     )
     command = ["ffmpeg", "-y", "-v", "error"]
     if start > 0.001:
         command += ["-ss", f"{start:.3f}"]
-    command += ["-i", str(source)]
+    command += ["-i", str(source), "-loop", "1", "-i", str(brand)]
     if dur is not None:
         command += ["-t", f"{dur:.3f}"]
     command += [
-        "-vf",
+        "-filter_complex",
         vf,
+        "-map",
+        "[outv]",
+        "-map",
+        "0:a?",
         "-c:v",
         "libx264",
         "-preset",
@@ -422,6 +444,7 @@ def make_scene_short(
         "aac",
         "-b:a",
         "192k",
+        "-shortest",
         "-movflags",
         "+faststart",
         str(target),
@@ -440,6 +463,7 @@ def make_scene_short(
                 "start": start,
                 "duration": dur,
                 "crop": [crop_w, crop_h, x, y],
+                "brand": SHORT_BRAND_VERSION,
             }
         )
     )
@@ -633,6 +657,25 @@ def create_jar(title: str) -> dict | None:
     return {"id": jar_id, "jar": jar}
 
 
+def update_jar(jar_id: str, patch: dict) -> dict | None:
+    path = jar_file(jar_id)
+    if not path or not path.exists():
+        return None
+    jar = load_jar(path)
+    if "title" in patch:
+        title = str(patch.get("title") or "").strip()
+        if title:
+            jar["title"] = title
+    if "summary" in patch:
+        jar["summary"] = str(patch.get("summary") or "")
+    if "descriptor" in patch:
+        descriptor = str(patch.get("descriptor") or "").strip()
+        if descriptor:
+            jar["descriptor"] = descriptor
+    write_json(path, jar)
+    return collect_jar(jar_id)
+
+
 def attach_video_to_jar(jar_id: str, video_id: str) -> None:
     path = jar_file(jar_id)
     if not path or not path.exists():
@@ -685,6 +728,7 @@ def create_video(title: str, jar_id: str | None = None) -> dict | None:
                 "transition_out": "fade",
                 "fade_zoom": None,
                 "image_prompt": "",
+                "generated_prompt": "",
                 "music_prompt": "",
             }
         ],
@@ -1355,6 +1399,90 @@ def claude_vision_prompt(
     return prompt, model, usage
 
 
+def claude_text_prompt(user_text: str, *, system: str) -> tuple[str, str, dict]:
+    """Ask Claude for a text-only prompt. Returns (prompt, model, usage)."""
+    key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+    model = (os.environ.get("ANTHROPIC_MODEL") or "claude-opus-5").strip() or "claude-opus-5"
+    body = {
+        "model": model,
+        "max_tokens": 1600,
+        "system": system,
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": user_text.strip()}],
+            }
+        ],
+    }
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        message = detail
+        try:
+            err = json.loads(detail).get("error") or {}
+            message = err.get("message") or detail
+        except json.JSONDecodeError:
+            pass
+        raise RuntimeError(message or f"Anthropic HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Anthropic request failed: {exc.reason}") from exc
+
+    parts = []
+    for block in payload.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = str(block.get("text") or "").strip()
+            if text:
+                parts.append(text)
+    prompt = "\n\n".join(parts).strip()
+    if not prompt:
+        raise RuntimeError("Claude returned an empty prompt")
+    usage = payload.get("usage") or {}
+    return prompt, model, usage
+
+
+def claude_scene_image_prompt(
+    feeling: str,
+    image_mind: str,
+    scene_contain: str,
+    title: str = "",
+) -> tuple[str, str, dict]:
+    chunks = []
+    if feeling.strip():
+        chunks.append(f"Desired feeling:\n{feeling.strip()}")
+    if image_mind.strip():
+        chunks.append(f"Images in mind:\n{image_mind.strip()}")
+    if title.strip():
+        chunks.append(f"Scene title:\n{title.strip()}")
+    chunks.append(f"What this scene contains:\n{scene_contain.strip()}")
+    return claude_text_prompt(
+        "\n\n".join(chunks),
+        system=(
+            "You write prompts for ChatGPT image generation of a single still frame "
+            "for a long-form ambient video. Use desired feeling and images in mind as "
+            "the emotional and visual world. Use what this scene contains as the "
+            "specific subject of THIS still. Write a detailed, concrete image prompt: "
+            "setting, subjects, materials, light, and composition. Do NOT include "
+            "technical house style (miniature look, tilt-shift, camera grade) — that "
+            "is appended separately. Output ONLY the prompt — no preamble, no quotes, "
+            "no markdown."
+        ),
+    )
+
+
 def claude_still_edit_prompt(
     image_b64: str,
     media_type: str,
@@ -1671,6 +1799,14 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return video_id, path
 
+    def require_jar(self) -> tuple[str, Path] | None:
+        jar_id = (self.query().get("j") or [None])[0]
+        path = jar_file(jar_id or "")
+        if not path or not path.exists():
+            self.send_json({"error": "unknown jar"}, status=404)
+            return None
+        return jar_id, path
+
     def do_GET(self) -> None:
         url = urlparse(self.path)
         route = url.path
@@ -1824,7 +1960,10 @@ class Handler(BaseHTTPRequestHandler):
             except RuntimeError as exc:
                 self.send_error(500, str(exc))
                 return
-            self.send_media(target, download_as=target.name)
+            self.send_media(
+                target,
+                download_as=f"{target.stem}-wonderjar{target.suffix}",
+            )
             return
         if route == "/download-asset":
             source = safe_path((self.query().get("path") or [""])[0])
@@ -1870,6 +2009,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route == "/api/generate-image":
             self.generate_image()
+            return
+        if route == "/api/scene-prompt":
+            self.scene_prompt()
             return
         if route == "/api/edit-still":
             self.edit_still()
@@ -1947,6 +2089,53 @@ class Handler(BaseHTTPRequestHandler):
 
         started = render.start(path, video_id=video_id, scene=scene)
         self.send_json(render.snapshot(), status=200 if started else 409)
+
+    def scene_prompt(self) -> None:
+        """Claude writes a ChatGPT still prompt from video details + scene contents."""
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0 or length > 200_000:
+            self.send_json({"error": "missing or oversized JSON body"}, status=400)
+            return
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError as exc:
+            self.send_json({"error": f"invalid JSON: {exc}"}, status=400)
+            return
+
+        scene_contain = str(payload.get("scene_contain") or "").strip()
+        if not scene_contain:
+            self.send_json({"error": "what this scene contains is required"}, status=400)
+            return
+        feeling = str(payload.get("feeling") or "")
+        image_mind = str(payload.get("image_mind") or "")
+        title = str(payload.get("title") or "")
+        video_id = str(payload.get("video") or "").strip() or None
+        try:
+            prompt, model, usage = claude_scene_image_prompt(
+                feeling, image_mind, scene_contain, title
+            )
+        except RuntimeError as exc:
+            self.send_json({"error": str(exc)}, status=502)
+            return
+        cost, estimated = estimate_claude_cost(model, usage)
+        append_ledger(
+            video_id,
+            provider="anthropic",
+            model=model,
+            note="Writing a scene prompt",
+            cost=cost,
+            estimated=estimated,
+            meta={"usage": usage},
+        )
+        self.send_json(
+            {
+                "ok": True,
+                "prompt": prompt,
+                "model": model,
+                "cost": cost,
+                "estimated": estimated,
+            }
+        )
 
     def generate_image(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
@@ -2333,7 +2522,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"deleted": True, "path": relative})
 
     def do_PUT(self) -> None:
-        if urlparse(self.path).path != "/api/script":
+        route = urlparse(self.path).path
+        if route == "/api/jar":
+            required = self.require_jar()
+            if not required:
+                return
+            jar_id, _ = required
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                patch = json.loads(self.rfile.read(length)) if length else {}
+            except json.JSONDecodeError as exc:
+                self.send_json({"error": f"invalid JSON: {exc}"}, status=400)
+                return
+            if not isinstance(patch, dict):
+                self.send_json({"error": "invalid JSON"}, status=400)
+                return
+            updated = update_jar(jar_id, patch)
+            if not updated:
+                self.send_json({"error": "unknown jar"}, status=404)
+                return
+            self.send_json({"saved": True, **updated})
+            return
+        if route != "/api/script":
             self.send_error(404)
             return
         required = self.require_video()

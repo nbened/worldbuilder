@@ -41,13 +41,14 @@ const state = {
   landingMuted: true, // landing hero starts muted for autoplay; speaker toggles
   detailsDirty: false,
   detailsOpen: false,
+  detailsTab: "feeling", // feeling | prompts | places
   sceneDetailsOpen: false,
   transitionSettingsOpen: false,
   /** AI still generation on the scene page */
   sceneGen: {
-    revealed: false, // show composed OpenAI prompt (disabled field)
-    videoPromptOpen: false, // toggle for episode/video prompt above scene describe
-    status: "idle", // idle | generating | error
+    revealed: false, // show Claude-generated scene prompt
+    videoPromptOpen: true, // toggle for video details above scene describe
+    status: "idle", // idle | prompting | generating | error
     error: "",
   },
   /** Inline still edit: crop → Claude → ChatGPT image edit */
@@ -143,7 +144,25 @@ function h(tag, props = {}, ...children) {
     if (child === null || child === undefined || child === false) continue;
     node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
+  if (tag === "textarea") {
+    const grow = () => fitTextarea(node);
+    node.addEventListener("input", grow);
+    queueMicrotask(grow);
+  }
   return node;
+}
+
+function fitTextarea(el) {
+  if (!el || el.tagName !== "TEXTAREA") return;
+  const rows = Math.max(1, Number(el.getAttribute("rows") || 2));
+  const cs = getComputedStyle(el);
+  const line = parseFloat(cs.lineHeight);
+  const linePx = Number.isFinite(line) && cs.lineHeight !== "normal" ? line : parseFloat(cs.fontSize) * 1.45;
+  const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  const border = (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+  const min = rows * linePx + pad + border;
+  el.style.height = "auto";
+  el.style.height = `${Math.max(min, el.scrollHeight)}px`;
 }
 
 function clock(seconds) {
@@ -290,6 +309,25 @@ function trashIcon() {
     h("path", {
       d: "M3.5 4.5h9M6 4.5V3.2A1.2 1.2 0 0 1 7.2 2h1.6A1.2 1.2 0 0 1 10 3.2V4.5M5 4.5l.4 8.2A1 1 0 0 0 6.4 13.5h3.2a1 1 0 0 0 1-.8L11 4.5",
     })
+  );
+}
+
+function copyIcon() {
+  return h(
+    "svg",
+    {
+      class: "icon",
+      viewBox: "0 0 16 16",
+      width: "14",
+      height: "14",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.4",
+      "stroke-linejoin": "round",
+      "aria-hidden": true,
+    },
+    h("rect", { x: "5.5", y: "5.5", width: "8", height: "8", rx: "1.2" }),
+    h("path", { d: "M10.5 5.5V3.8A1.3 1.3 0 0 0 9.2 2.5H3.8A1.3 1.3 0 0 0 2.5 3.8v5.4A1.3 1.3 0 0 0 3.8 10.5H5.5" })
   );
 }
 
@@ -743,10 +781,13 @@ function canonicalizeTransitionSceneIndex(index) {
 function ensureCreativeBrief() {
   if (!state.script) return;
   if (typeof state.script.feeling !== "string") state.script.feeling = "";
-  // Only seed the house prompt once — never clobber while the user is editing.
-  if (typeof state.script.prompt !== "string") {
-    state.script.prompt = DEFAULT_PROMPT;
+  if (typeof state.script.image_mind !== "string") state.script.image_mind = "";
+  if (typeof state.script.music_mind !== "string") state.script.music_mind = "";
+  if (typeof state.script.image_style !== "string") {
+    state.script.image_style = DEFAULT_PROMPT;
   }
+  if (typeof state.script.music_style !== "string") state.script.music_style = "";
+  if (typeof state.script.prompt !== "string") state.script.prompt = "";
   if (typeof state.script.music_prompt !== "string") state.script.music_prompt = "";
   migrateDestinationPromptsToScenes();
   if (!Array.isArray(state.script.destinations)) state.script.destinations = [""];
@@ -771,6 +812,7 @@ function ensureCreativeBrief() {
 function ensureSceneBrief(entry = scene()) {
   if (!entry || typeof entry !== "object") return entry;
   if (typeof entry.image_prompt !== "string") entry.image_prompt = "";
+  if (typeof entry.generated_prompt !== "string") entry.generated_prompt = "";
   if (typeof entry.music_prompt !== "string") entry.music_prompt = "";
   return entry;
 }
@@ -833,6 +875,7 @@ function blankScene() {
     transition_out: "fade",
     fade_zoom: null,
     image_prompt: "",
+    generated_prompt: "",
     music_prompt: "",
   };
 }
@@ -3438,14 +3481,48 @@ async function save() {
   render();
 }
 
+function markJarDirty() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveJar, 400);
+}
+
+async function saveJar() {
+  if (!state.jarId || !state.jar) return;
+  state.saving = true;
+  const crumb = document.querySelector(".crumb-jar");
+  if (crumb) crumb.textContent = (state.jar.title || "").trim() || state.jarId;
+  const response = await fetch(`/api/jar?j=${encodeURIComponent(state.jarId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: state.jar.title,
+      summary: state.jar.summary,
+    }),
+  });
+  state.saving = false;
+  state.note = response.ok ? "" : "Could not save";
+  if (response.ok) {
+    const data = await response.json().catch(() => ({}));
+    if (data.jar) {
+      state.jar = data.jar;
+      state.jarMeta = {
+        id: state.jarId,
+        title: data.jar.title || state.jarId,
+        descriptor: data.jar.descriptor || "world",
+      };
+    }
+  }
+  render();
+}
+
 function detailsComplete() {
   if (!state.script) return false;
   ensureCreativeBrief();
   const feeling = (state.script.feeling || "").trim();
-  const prompt = (state.script.prompt || "").trim();
-  const music = (state.script.music_prompt || "").trim();
+  const images = (state.script.image_mind || "").trim();
+  const music = (state.script.music_mind || "").trim();
   const destinations = (state.script.destinations || []).some((place) => String(place).trim());
-  return Boolean(feeling && prompt && music && destinations);
+  return Boolean(feeling && images && music && destinations);
 }
 
 function sceneDetailsComplete(entry = scene()) {
@@ -3490,6 +3567,36 @@ function briefCopyButton(getText, title = "Copy", label = "Copy") {
   );
 }
 
+function briefCopyIconButton(getText, title = "Copy") {
+  return h(
+    "button",
+    {
+      class: "brief-copy-icon",
+      type: "button",
+      title,
+      "aria-label": title,
+      onClick: async (event) => {
+        const text = getText() || "";
+        const btn = event.currentTarget;
+        try {
+          await navigator.clipboard.writeText(text);
+          btn.classList.add("is-copied");
+          btn.title = "Copied";
+          setTimeout(() => {
+            if (!btn.isConnected) return;
+            btn.classList.remove("is-copied");
+            btn.title = title;
+          }, 1200);
+        } catch {
+          state.note = "Could not copy";
+          render();
+        }
+      },
+    },
+    copyIcon()
+  );
+}
+
 function joinPrompts(...parts) {
   return parts
     .map((part) => String(part || "").trim())
@@ -3497,12 +3604,61 @@ function joinPrompts(...parts) {
     .join("\n\n");
 }
 
+function labeledPrompt(title, text) {
+  const body = String(text || "").trim();
+  return body ? `${title}\n${body}` : "";
+}
+
+function composeEpisodeImagePrompt() {
+  ensureCreativeBrief();
+  return joinPrompts(
+    labeledPrompt("Desired feeling", state.script.feeling),
+    labeledPrompt("Images in mind", state.script.image_mind),
+    labeledPrompt("Image style", state.script.image_style)
+  );
+}
+
+function composeEpisodeMusicPrompt() {
+  ensureCreativeBrief();
+  return joinPrompts(
+    labeledPrompt("Desired feeling", state.script.feeling),
+    labeledPrompt("Music in mind", state.script.music_mind),
+    labeledPrompt("Music style", state.script.music_style)
+  );
+}
+
+function generateEpisodePrompt(kind) {
+  ensureCreativeBrief();
+  if (kind === "music") state.script.music_prompt = composeEpisodeMusicPrompt();
+  else state.script.prompt = composeEpisodeImagePrompt();
+  markDetailsDirty();
+  render();
+}
+
+function briefActionButton(label, title, onClick) {
+  return h(
+    "button",
+    {
+      class: "btn ghost brief-copy",
+      type: "button",
+      title,
+      onClick,
+    },
+    label
+  );
+}
+
 function fullSceneImagePrompt(entry = scene()) {
   ensureCreativeBrief();
   ensureSceneBrief(entry);
+  const generated = (entry.generated_prompt || "").trim();
+  if (generated) {
+    return joinPrompts(generated, state.script.image_style);
+  }
   return joinPrompts(
     state.jar?.prompt,
     state.script.prompt,
+    state.script.image_style,
     entry.title?.trim() ? `Scene: ${entry.title.trim()}` : "",
     entry.image_prompt
   );
@@ -3629,8 +3785,8 @@ function landingCopy() {
     brand: landing.brand || "Wonderjar",
     title: landing.title || "Build a world that pulls you in.",
     description: landing.description || "Build it. Light it. Share it.",
-    cta: landing.cta || "Enter Riverbend",
-    href: landing.href || "/video?v=riverbend",
+    cta: landing.cta || "Step in",
+    href: landing.href || "/jars",
     videoId: landing.videoId || "riverbend",
     secondary: landing.secondary || "or build your own",
     secondaryHref: landing.secondaryHref || "/videos",
@@ -3805,6 +3961,17 @@ async function loadJars() {
   state.jars = data.jars || [];
 }
 
+function ensureJar() {
+  if (!state.jar || typeof state.jar !== "object") {
+    state.jar = {
+      title: state.jarMeta?.title || state.jarId || "",
+      descriptor: state.jarMeta?.descriptor || "world",
+      summary: "",
+      videos: [],
+    };
+  }
+}
+
 async function loadJar(jarId, { soft = false } = {}) {
   const response = await fetch(`/api/jar?j=${encodeURIComponent(jarId)}`);
   if (!response.ok) {
@@ -3855,6 +4022,7 @@ async function loadVideo(videoId, jarId = null) {
   }
   state.detailsDirty = false;
   state.detailsOpen = false;
+  state.detailsTab = "feeling";
   state.sceneDetailsOpen = false;
   state.ledger = {
     open: false,
@@ -4501,6 +4669,10 @@ function shortCutPanel() {
     "div",
     { class: "short-cut-panel" },
     h("div", { class: "short-cut-title", text: "Cut short" }),
+    h("p", {
+      class: "meta",
+      text: "Clips this 9:16 window from the processed scene (animations included) and stamps Wonderjar on it.",
+    }),
     h(
       "div",
       { class: "short-cut-row" },
@@ -4562,8 +4734,8 @@ function shortCutPanel() {
             ? "Download"
             : "Process & download",
         title: ready
-          ? "Download the 9:16 short"
-          : "Process this scene, then download the short",
+          ? "Clip this 9:16 window from the processed scene and stamp Wonderjar"
+          : "Process this scene, then clip the 9:16 window with Wonderjar",
         onClick: () => confirmShortDownload(),
       })
     )
@@ -4717,10 +4889,69 @@ async function clearSceneImage({ deleteAsset = false } = {}) {
   changed();
 }
 
+async function generateScenePrompt() {
+  ensureCreativeBrief();
+  const entry = ensureSceneBrief();
+  const prev = state.sceneGen || {};
+  const contain = (entry.image_prompt || "").trim();
+  if (!contain) {
+    state.sceneGen = {
+      ...prev,
+      revealed: true,
+      status: "error",
+      error: "Say what this scene contains first.",
+    };
+    render();
+    return;
+  }
+  state.sceneGen = { ...prev, revealed: true, status: "prompting", error: "" };
+  render();
+  try {
+    const response = await fetch("/api/scene-prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        feeling: state.script.feeling || "",
+        image_mind: state.script.image_mind || "",
+        scene_contain: contain,
+        title: entry.title || "",
+        video: state.videoId,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Prompt generation failed");
+    entry.generated_prompt = data.prompt || "";
+    markDetailsDirty();
+    state.sceneGen = { ...prev, revealed: true, status: "idle", error: "" };
+    state.note = "Scene prompt generated";
+    if (state.ledger?.open) await refreshLedger({ silent: true });
+    else refreshLedger({ silent: true });
+    render();
+  } catch (error) {
+    state.sceneGen = {
+      ...prev,
+      revealed: true,
+      status: "error",
+      error: error.message || "Prompt generation failed",
+    };
+    render();
+  }
+}
+
 async function createSceneImage() {
   const entry = ensureSceneBrief();
   const prompt = fullSceneImagePrompt(entry);
   const prev = state.sceneGen || {};
+  if (!(entry.generated_prompt || "").trim()) {
+    state.sceneGen = {
+      ...prev,
+      revealed: true,
+      status: "error",
+      error: "Generate a prompt first.",
+    };
+    render();
+    return;
+  }
   if (!prompt.trim()) {
     state.sceneGen = {
       ...prev,
@@ -4762,21 +4993,58 @@ async function createSceneImage() {
   }
 }
 
+function videoDetailsSummary() {
+  ensureCreativeBrief();
+  const feeling = (state.script.feeling || "").trim();
+  const images = (state.script.image_mind || "").trim();
+  const blocks = [];
+  if (feeling) {
+    blocks.push(
+      h(
+        "div",
+        { class: "scene-create-video-block" },
+        h("strong", { text: "Desired feeling" }),
+        h("p", { text: feeling })
+      )
+    );
+  }
+  if (images) {
+    blocks.push(
+      h(
+        "div",
+        { class: "scene-create-video-block" },
+        h("strong", { text: "Images in mind" }),
+        h("p", { text: images })
+      )
+    );
+  }
+  if (!blocks.length) {
+    return h("p", {
+      class: "scene-create-video-empty",
+      text: "Add desired feeling and images in mind in Video details.",
+    });
+  }
+  return h("div", { class: "scene-create-video-summary" }, ...blocks);
+}
+
 function sceneCreatePanel() {
   if (isTransitionScene() || state.pictureExpanded) return null;
   ensureCreativeBrief();
   const entry = ensureSceneBrief();
   const gen = state.sceneGen || {
     revealed: false,
-    videoPromptOpen: false,
+    videoPromptOpen: true,
     status: "idle",
     error: "",
   };
+  const busy = gen.status === "generating" || gen.status === "prompting";
+  const prompting = gen.status === "prompting";
   const generating = gen.status === "generating";
-  const videoPromptOpen = !!gen.videoPromptOpen;
+  const videoPromptOpen = gen.videoPromptOpen !== false;
+  const hasGenerated = Boolean((entry.generated_prompt || "").trim());
   return h(
     "section",
-    { class: `scene-create${generating ? " is-generating" : ""}` },
+    { class: `scene-create${busy ? " is-generating" : ""}` },
     h(
       "div",
       { class: `scene-create-video${videoPromptOpen ? " is-open" : ""}` },
@@ -4796,35 +5064,66 @@ function sceneCreatePanel() {
           "aria-hidden": true,
           text: videoPromptOpen ? "▾" : "▸",
         }),
-        h("span", { text: "Video prompt" })
+        h("span", { text: "Video details" })
       ),
-      videoPromptOpen &&
-        h("textarea", {
-          class: "brief-input scene-create-video-prompt",
-          rows: 4,
-          value: state.script.prompt || "",
-          disabled: generating,
-          "aria-label": "Video image prompt",
-          title: "House style for this video — used by every scene",
-          onInput: (event) => {
-            state.script.prompt = event.target.value;
-            markDetailsDirty();
-            clearTimeout(saveTimer);
-            saveTimer = setTimeout(save, 400);
-          },
-        })
+      videoPromptOpen && videoDetailsSummary()
     ),
-    h("textarea", {
-      class: "brief-input scene-create-prompt",
-      rows: 3,
-      value: entry.image_prompt || "",
-      placeholder: "Describe this scene",
-      disabled: generating,
-      onInput: (event) => {
-        entry.image_prompt = event.target.value;
-        markDetailsDirty();
-      },
-    }),
+    h(
+      "label",
+      { class: "scene-create-field" },
+      briefLabel("What does this scene contain"),
+      h("textarea", {
+        class: "brief-input scene-create-prompt",
+        rows: 3,
+        value: entry.image_prompt || "",
+        placeholder: "A lone cottage in the snow…",
+        disabled: busy,
+        onInput: (event) => {
+          entry.image_prompt = event.target.value;
+          markDetailsDirty();
+        },
+      })
+    ),
+    h(
+      "div",
+      { class: "scene-create-actions" },
+      h(
+        "button",
+        {
+          class: "btn ghost scene-create-btn",
+          type: "button",
+          disabled: busy,
+          onClick: () => generateScenePrompt(),
+        },
+        prompting ? "Generating prompt…" : "Generate prompt"
+      )
+    ),
+    (hasGenerated || gen.revealed) &&
+      h(
+        "div",
+        { class: "scene-create-field" },
+        h(
+          "div",
+          { class: "brief-label-row" },
+          briefLabel("Scene prompt")
+        ),
+        h(
+          "div",
+          { class: "brief-prompt-wrap" },
+          h("textarea", {
+            class: "brief-input scene-create-generated",
+            rows: 6,
+            value: entry.generated_prompt || "",
+            placeholder: "Claude’s image prompt appears here.",
+            disabled: busy,
+            onInput: (event) => {
+              entry.generated_prompt = event.target.value;
+              markDetailsDirty();
+            },
+          }),
+          briefCopyIconButton(() => entry.generated_prompt || "", "Copy scene prompt")
+        )
+      ),
     h(
       "div",
       { class: "scene-create-actions" },
@@ -4833,12 +5132,16 @@ function sceneCreatePanel() {
         {
           class: "btn primary scene-create-btn",
           type: "button",
-          disabled: generating,
+          disabled: busy || !hasGenerated,
+          title: hasGenerated
+            ? "Generate a still from this prompt plus the video’s image style"
+            : "Generate a prompt first",
           onClick: () => createSceneImage(),
         },
         generating ? "Generating…" : "Create a scene"
       )
     ),
+    prompting && h("p", { class: "scene-create-status", text: "Writing prompt" }),
     generating && h("p", { class: "scene-create-status", text: "Generating" }),
     gen.status === "error" &&
       gen.error &&
@@ -4881,6 +5184,18 @@ function poll() {
 
 /* ---------- chrome ---------- */
 
+function brandLink() {
+  return h("a", {
+    class: "brand",
+    href: "/",
+    onClick: (event) => {
+      event.preventDefault();
+      go("landing");
+    },
+    text: state.site?.landing?.brand || "Wonderjar",
+  });
+}
+
 function breadcrumbs() {
   const crumbs = [
     h("a", {
@@ -4898,7 +5213,7 @@ function breadcrumbs() {
     crumbs.push(h("span", { class: "sep", text: "/" }));
     crumbs.push(
       h("a", {
-        class: "crumb",
+        class: "crumb crumb-jar",
         href: `/jar?j=${encodeURIComponent(state.jarMeta.id)}`,
         onClick: (event) => {
           event.preventDefault();
@@ -4940,12 +5255,16 @@ function breadcrumbs() {
 function topbar(actions = []) {
   return h(
     "header",
-    { class: "topbar" },
+    { class: `topbar${state.page === "scene" ? " topbar--crumbs-left" : ""}` },
+    brandLink(),
     breadcrumbs(),
-    h("span", { class: "spacer" }),
-    state.note && h("span", { class: "meta warn", text: state.note }),
-    state.saving && h("span", { class: "meta", text: "Saving…" }),
-    ...actions
+    h(
+      "div",
+      { class: "topbar-end" },
+      state.note && h("span", { class: "meta warn", text: state.note }),
+      state.saving && h("span", { class: "meta", text: "Saving…" }),
+      ...actions
+    )
   );
 }
 
@@ -5367,7 +5686,7 @@ function landingView() {
             href: copy.href,
             onClick: (event) => {
               event.preventDefault();
-              go("video", { videoId: copy.videoId });
+              go("jars");
             },
             text: copy.cta,
           }
@@ -5438,7 +5757,7 @@ function jarsView() {
           h("h1", { class: "page-title", text: "Jars" }),
           h("p", {
             class: "page-blurb",
-            text: "Worlds you can build in — each jar holds videos, scenes, and shared rules.",
+            text: "Worlds you can build in — each jar holds videos and scenes.",
           })
         ),
         h(
@@ -5505,7 +5824,7 @@ function jarsView() {
 
 function jarView() {
   const jar = state.jar || {};
-  const title = state.jarMeta?.title || state.jarId || "Jar";
+  const title = jar.title || state.jarMeta?.title || state.jarId || "Jar";
   const descriptor = state.jarMeta?.descriptor || jar.descriptor || "world";
   return h(
     "div",
@@ -5517,15 +5836,35 @@ function jarView() {
       h(
         "div",
         { class: "page-title-row" },
-        h("h1", { class: "page-title", text: title }),
+        h("input", {
+          class: "page-title jar-title",
+          type: "text",
+          value: title,
+          placeholder: "Jar name",
+          "aria-label": "Jar name",
+          onInput: (event) => {
+            ensureJar();
+            state.jar.title = event.target.value;
+            if (state.jarMeta) state.jarMeta.title = event.target.value;
+            const crumb = document.querySelector(".crumb-jar");
+            if (crumb) crumb.textContent = event.target.value.trim() || state.jarId;
+            markJarDirty();
+          },
+        }),
         h("span", { class: "jar-descriptor is-large", text: descriptor })
       ),
-      jar.summary
-        ? h("p", { class: "page-blurb", text: jar.summary })
-        : h("p", {
-            class: "page-blurb",
-            text: "Videos in this world. Rules and prompts below apply across them.",
-          }),
+      h("textarea", {
+        class: "page-blurb jar-summary",
+        rows: 2,
+        value: jar.summary || "",
+        placeholder: "Add a description",
+        "aria-label": "Jar description",
+        onInput: (event) => {
+          ensureJar();
+          state.jar.summary = event.target.value;
+          markJarDirty();
+        },
+      }),
       jar.hero
         ? h(
             "div",
@@ -5551,28 +5890,6 @@ function jarView() {
             })
           )
         : null,
-      h(
-        "div",
-        { class: "jar-panels" },
-        h(
-          "section",
-          { class: "jar-panel" },
-          h("h2", { class: "jar-panel-title", text: "Rules" }),
-          h("p", {
-            class: "jar-panel-body",
-            text: jar.rules || "No rules set for this world yet.",
-          })
-        ),
-        h(
-          "section",
-          { class: "jar-panel" },
-          h("h2", { class: "jar-panel-title", text: "Global prompt" }),
-          h("p", {
-            class: "jar-panel-body",
-            text: jar.prompt || "No global prompt yet.",
-          })
-        )
-      ),
       h(
         "div",
         { class: "jar-section-head" },
@@ -5704,27 +6021,27 @@ function sceneDetails() {
           h(
             "div",
             { class: "brief-label-row" },
-            briefLabel("Image prompt", !entry.is_transition),
+            briefLabel("What does this scene contain", !entry.is_transition),
             h(
               "span",
               { class: "brief-copy-group" },
-              briefCopyButton(() => entry.image_prompt || "", "Copy this scene’s image note only"),
+              briefCopyButton(() => entry.image_prompt || "", "Copy this scene’s contents only"),
               briefCopyButton(
                 () => fullSceneImagePrompt(entry),
-                "Copy full image prompt (episode + scene) for generating this still",
+                "Copy generated prompt plus image style",
                 "Copy full"
               )
             )
           ),
           h("p", {
             class: "brief-hint",
-            text: "What we see here — Copy full includes the episode house style.",
+            text: "What we see here — Generate prompt on the scene page, then Copy full includes image style.",
           }),
           h("textarea", {
             class: "brief-input destination-prompt",
             rows: 4,
             value: entry.image_prompt || "",
-            placeholder: "Describe this stop’s picture — appends to the episode image prompt.",
+            placeholder: "What does this scene contain?",
             onInput: (event) => {
               entry.image_prompt = event.target.value;
               markDetailsDirty();
@@ -5769,6 +6086,25 @@ function sceneDetails() {
   );
 }
 
+function briefTab(id, label) {
+  const on = state.detailsTab === id;
+  return h(
+    "button",
+    {
+      class: `brief-tab${on ? " is-on" : ""}`,
+      type: "button",
+      role: "tab",
+      "aria-selected": on ? "true" : "false",
+      onClick: () => {
+        state.detailsTab = id;
+        if (!state.detailsOpen) state.detailsOpen = true;
+        render();
+      },
+    },
+    label
+  );
+}
+
 function creativeBrief() {
   ensureCreativeBrief();
   const cast = state.script.cast;
@@ -5808,7 +6144,13 @@ function creativeBrief() {
         h(
           "div",
           { class: "brief-head" },
-          h("span", { class: "meta", text: "Episode brief for writing and art" }),
+          h(
+            "div",
+            { class: "brief-tabs", role: "tablist", "aria-label": "Video details" },
+            briefTab("feeling", "Emotional input"),
+            briefTab("prompts", "Technical prompts"),
+            briefTab("places", "Places")
+          ),
           h(
             "button",
             {
@@ -5820,168 +6162,268 @@ function creativeBrief() {
             state.saving ? "Saving…" : dirty ? "Save" : "Saved"
           )
         ),
-        h(
-          "label",
-          { class: "brief-field" },
-          briefLabel("Desired feeling", true),
-          h("textarea", {
-            class: "brief-input",
-            rows: 3,
-            value: state.script.feeling || "",
-            placeholder:
-              "What are you trying to express — how should this feel to the viewer? The melancholy but excitement of fall, quiet anticipation before rain, etc.",
-            onInput: (event) => {
-              state.script.feeling = event.target.value;
-              markDetailsDirty();
-            },
-          })
-        ),
-        h(
-          "div",
-          { class: "brief-field" },
+        state.detailsTab === "feeling" &&
           h(
-            "div",
-            { class: "brief-label-row" },
-            briefLabel("Image prompt", true),
-            briefCopyButton(() => state.script.prompt || "", "Copy image prompt")
+            "section",
+            { class: "brief-section", role: "tabpanel" },
+            h("p", {
+              class: "brief-hint",
+              text: "What you’re trying to put in the room. Technical prompts are built from these.",
+            }),
+            h(
+              "label",
+              { class: "brief-field" },
+              briefLabel("Desired feeling", true),
+              h("textarea", {
+                class: "brief-input",
+                rows: 3,
+                value: state.script.feeling || "",
+                placeholder:
+                  "best if you feel it right now- what are you trying to communicate? can you paint a picture of your mind right now so that we can allow others to step inside?",
+                onInput: (event) => {
+                  state.script.feeling = event.target.value;
+                  markDetailsDirty();
+                },
+              })
+            ),
+            h(
+              "label",
+              { class: "brief-field" },
+              briefLabel("Any images come to mind?", true),
+              h("textarea", {
+                class: "brief-input",
+                rows: 3,
+                value: state.script.image_mind || "",
+                placeholder: "What images come to mind?",
+                onInput: (event) => {
+                  state.script.image_mind = event.target.value;
+                  markDetailsDirty();
+                },
+              })
+            ),
+            h(
+              "label",
+              { class: "brief-field" },
+              briefLabel("Any music come to mind?", true),
+              h("textarea", {
+                class: "brief-input",
+                rows: 3,
+                value: state.script.music_mind || "",
+                placeholder: "What music comes to mind?",
+                onInput: (event) => {
+                  state.script.music_mind = event.target.value;
+                  markDetailsDirty();
+                },
+              })
+            )
           ),
-          h("p", {
-            class: "brief-hint",
-            text: "House style for every still — each scene adds its own place details.",
-          }),
-          h("textarea", {
-            class: "brief-input brief-prompt",
-            rows: 8,
-            value: state.script.prompt || "",
-            placeholder: "Use the feeling above to tune this house style for the episode.",
-            onInput: (event) => {
-              state.script.prompt = event.target.value;
-              markDetailsDirty();
-            },
-          })
-        ),
-        h(
-          "div",
-          { class: "brief-field" },
+        state.detailsTab === "prompts" &&
           h(
-            "div",
-            { class: "brief-label-row" },
-            briefLabel("Music prompt", true),
-            briefCopyButton(() => state.script.music_prompt || "", "Copy music prompt")
-          ),
-          h("p", {
-            class: "brief-hint",
-            text: "Episode-wide playlist direction — each scene can get more specific.",
-          }),
-          h("textarea", {
-            class: "brief-input brief-prompt",
-            rows: 5,
-            value: state.script.music_prompt || "",
-            placeholder:
-              "Describe the playlist mood — instrumentation, tempo, era, and how it should carry the feeling.",
-            onInput: (event) => {
-              state.script.music_prompt = event.target.value;
-              markDetailsDirty();
-            },
-          })
-        ),
-        h(
-          "div",
-          { class: "brief-field" },
-          briefLabel("Destinations", true),
-          h("p", {
-            class: "brief-hint",
-            text: "Definite places this episode visits — open a scene for its prompts.",
-          }),
-          h(
-            "div",
-            { class: "destination-list" },
-            state.script.destinations.map((place, index) =>
+            "section",
+            { class: "brief-section", role: "tabpanel" },
+            h("p", {
+              class: "brief-hint",
+              text: "Styles are the technical look and sound. Generate from answers writes each prompt with that style at the end.",
+            }),
+            h(
+              "label",
+              { class: "brief-field" },
+              briefLabel("Image style"),
+              h("p", {
+                class: "brief-hint",
+                text: "How pictures should look technically — miniature, materials, light, grade.",
+              }),
+              h("textarea", {
+                class: "brief-input",
+                rows: 5,
+                value: state.script.image_style || "",
+                placeholder: "Museum-quality miniature, warm lamps, tilt-shift, lived-in materials…",
+                onInput: (event) => {
+                  state.script.image_style = event.target.value;
+                  markDetailsDirty();
+                },
+              })
+            ),
+            h(
+              "div",
+              { class: "brief-field" },
               h(
                 "div",
-                { class: "destination-row" },
-                h("span", { class: "destination-index", text: String(index + 1) }),
-                h("input", {
-                  class: "destination-input",
-                  type: "text",
-                  value: place,
-                  placeholder:
-                    index === 0
-                      ? "Riverbend Station"
-                      : index === 1
-                        ? "The coffee shop on Main"
-                        : "Campfire overlook",
+                { class: "brief-label-row" },
+                briefLabel("Image prompt"),
+                briefActionButton(
+                  "Generate from answers",
+                  "Write this from feeling, images in mind, and image style",
+                  () => generateEpisodePrompt("image")
+                )
+              ),
+              h(
+                "div",
+                { class: "brief-prompt-wrap" },
+                h("textarea", {
+                  class: "brief-input brief-prompt",
+                  rows: 8,
+                  value: state.script.prompt || "",
+                  placeholder: "Generate from emotional input and image style, then edit.",
                   onInput: (event) => {
-                    state.script.destinations[index] = event.target.value;
+                    state.script.prompt = event.target.value;
                     markDetailsDirty();
                   },
-                  onKeydown: (event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      state.script.destinations.splice(index + 1, 0, "");
-                      markDetailsDirty();
-                      render();
-                      queueMicrotask(() => {
-                        const inputs = document.querySelectorAll(".destination-input");
-                        inputs[index + 1]?.focus();
-                      });
-                    }
+                }),
+                briefCopyIconButton(() => state.script.prompt || "", "Copy image prompt")
+              )
+            ),
+            h(
+              "label",
+              { class: "brief-field" },
+              briefLabel("Music style"),
+              h("p", {
+                class: "brief-hint",
+                text: "How the playlist should sound technically — instrumentation, tempo, era, mix.",
+              }),
+              h("textarea", {
+                class: "brief-input",
+                rows: 5,
+                value: state.script.music_style || "",
+                placeholder: "Warm analog, slow jazz, soft sax, vinyl crackle, no vocals…",
+                onInput: (event) => {
+                  state.script.music_style = event.target.value;
+                  markDetailsDirty();
+                },
+              })
+            ),
+            h(
+              "div",
+              { class: "brief-field" },
+              h(
+                "div",
+                { class: "brief-label-row" },
+                briefLabel("Music prompt"),
+                briefActionButton(
+                  "Generate from answers",
+                  "Write this from feeling, music in mind, and music style",
+                  () => generateEpisodePrompt("music")
+                )
+              ),
+              h(
+                "div",
+                { class: "brief-prompt-wrap" },
+                h("textarea", {
+                  class: "brief-input brief-prompt",
+                  rows: 5,
+                  value: state.script.music_prompt || "",
+                  placeholder: "Generate from emotional input and music style, then edit.",
+                  onInput: (event) => {
+                    state.script.music_prompt = event.target.value;
+                    markDetailsDirty();
                   },
                 }),
-                h(
-                  "button",
-                  {
-                    class: "destination-remove",
-                    type: "button",
-                    title: "Remove destination",
-                    disabled: state.script.destinations.length === 1 && !place,
-                    onClick: () => {
-                      if (state.script.destinations.length === 1) {
-                        state.script.destinations[0] = "";
-                      } else {
-                        state.script.destinations.splice(index, 1);
-                      }
-                      markDetailsDirty();
-                      render();
-                    },
-                  },
-                  trashIcon()
-                )
+                briefCopyIconButton(() => state.script.music_prompt || "", "Copy music prompt")
               )
             )
           ),
+        state.detailsTab === "places" &&
           h(
-            "button",
-            {
-              class: "btn ghost destination-add",
-              type: "button",
-              onClick: () => {
-                state.script.destinations.push("");
-                markDetailsDirty();
-                render();
-                queueMicrotask(() => {
-                  const inputs = document.querySelectorAll(".destination-input");
-                  inputs[inputs.length - 1]?.focus();
-                });
-              },
-            },
-            "+  Add destination"
+            "section",
+            { class: "brief-section", role: "tabpanel" },
+            h(
+              "div",
+              { class: "brief-field" },
+              briefLabel("Destinations", true),
+              h("p", {
+                class: "brief-hint",
+                text: "Definite places this episode visits — open a scene for its prompts.",
+              }),
+              h(
+                "div",
+                { class: "destination-list" },
+                state.script.destinations.map((place, index) =>
+                  h(
+                    "div",
+                    { class: "destination-row" },
+                    h("span", { class: "destination-index", text: String(index + 1) }),
+                    h("input", {
+                      class: "destination-input",
+                      type: "text",
+                      value: place,
+                      placeholder:
+                        index === 0
+                          ? "Riverbend Station"
+                          : index === 1
+                            ? "The coffee shop on Main"
+                            : "Campfire overlook",
+                      onInput: (event) => {
+                        state.script.destinations[index] = event.target.value;
+                        markDetailsDirty();
+                      },
+                      onKeydown: (event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          state.script.destinations.splice(index + 1, 0, "");
+                          markDetailsDirty();
+                          render();
+                          queueMicrotask(() => {
+                            const inputs = document.querySelectorAll(".destination-input");
+                            inputs[index + 1]?.focus();
+                          });
+                        }
+                      },
+                    }),
+                    h(
+                      "button",
+                      {
+                        class: "destination-remove",
+                        type: "button",
+                        title: "Remove destination",
+                        disabled: state.script.destinations.length === 1 && !place,
+                        onClick: () => {
+                          if (state.script.destinations.length === 1) {
+                            state.script.destinations[0] = "";
+                          } else {
+                            state.script.destinations.splice(index, 1);
+                          }
+                          markDetailsDirty();
+                          render();
+                        },
+                      },
+                      trashIcon()
+                    )
+                  )
+                )
+              ),
+              h(
+                "button",
+                {
+                  class: "btn ghost destination-add",
+                  type: "button",
+                  onClick: () => {
+                    state.script.destinations.push("");
+                    markDetailsDirty();
+                    render();
+                    queueMicrotask(() => {
+                      const inputs = document.querySelectorAll(".destination-input");
+                      inputs[inputs.length - 1]?.focus();
+                    });
+                  },
+                },
+                "+  Add destination"
+              )
+            ),
+            h(
+              "div",
+              { class: "brief-field" },
+              briefLabel("Cast"),
+              h("p", {
+                class: "brief-hint",
+                text: "These will appear in each scene like an iSpy book. Leave blank if not desired.",
+              }),
+              h(
+                "div",
+                { class: "cast-grid" },
+                cast.map((member, index) => castSlot(member, index))
+              )
+            )
           )
-        ),
-        h(
-          "div",
-          { class: "brief-field" },
-          briefLabel("Cast"),
-          h("p", {
-            class: "brief-hint",
-            text: "These will appear in each scene like an iSpy book. Leave blank if not desired.",
-          }),
-          h(
-            "div",
-            { class: "cast-grid" },
-            cast.map((member, index) => castSlot(member, index))
-          )
-        )
       )
   );
 }
@@ -6739,7 +7181,7 @@ async function requestRemoveScene(index) {
 async function requestCreateJar() {
   const title = await askName({
     title: "New jar",
-    message: "Name this world. You can fill in rules and prompts after.",
+    message: "Name this world.",
     confirmLabel: "Add jar",
     placeholder: "Jar name",
   });
@@ -7222,11 +7664,14 @@ function pictureStage(known, image) {
         {
           class: "picture-download",
           type: "button",
-          title: `Download ${image.split("/").pop()}`,
-          "aria-label": "Download image",
+          title: shortOn
+            ? "Download this 9:16 clip with Wonderjar"
+            : `Download ${image.split("/").pop()}`,
+          "aria-label": shortOn ? "Download short with Wonderjar" : "Download image",
           onClick: (event) => {
             event.stopPropagation();
-            downloadSceneImage();
+            if (shortOn) confirmShortDownload();
+            else downloadSceneImage();
           },
         },
         downloadIcon()
@@ -7429,7 +7874,8 @@ function pictureStage(known, image) {
             title: "Drag left or right",
             onPointerdown: beginShortRectDrag,
           },
-          h("span", { class: "short-rect-label", text: "9:16" })
+          h("span", { class: "short-rect-label", text: "9:16" }),
+          h("span", { class: "short-brand", text: "Wonderjar" })
         ),
       isTransitionScene() &&
         transitionStyleOf(scene()) === "fade_zoom" &&
@@ -10699,7 +11145,8 @@ window.addEventListener("popstate", () => {
 window.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "s") {
     event.preventDefault();
-    save();
+    if (state.page === "jar") saveJar();
+    else save();
   }
   if (event.key === "Escape") {
     if (state.confirm) {

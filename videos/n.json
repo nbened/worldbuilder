@@ -1,5 +1,5 @@
 {
-  "project": "",
+  "project": "Winter Retreat",
   "jar": "rainy-jazz",
   "output": {
     "file": "out/n.mp4",
@@ -50,11 +50,11 @@
       "show_seconds": 5
     }
   },
-  "feeling": "",
-  "prompt": "Museum-quality handcrafted miniature diorama, photographed as if it were a real physical scale model. Hyperrealistic miniature craftsmanship with meticulously detailed architecture, tiny handmade props, realistic wood grain, painted plaster, textured stone, brass, aged metals, woven fabrics, ceramic, glass, and miniature foliage. Every object feels tactile and hand-built rather than computer generated. Warm cinematic lighting with practical lamps, glowing windows, soft volumetric light, subtle bloom, rich golden highlights, and gentle shadows. Premium color grading featuring warm amber, honey, cream, walnut brown, muted greens, burnt orange, soft reds, and natural neutrals. No oversaturated colors. Tiny handcrafted human figures with realistic painted faces and clothing, posed naturally with subtle imperfections. Objects show slight wear and lived-in character instead of looking pristine. Highly realistic physical materials including glossy glass reflections, matte painted wood, textured brick, wet stone, polished brass, tiny leaves, moss, cloth fibers, and realistic weathering. The scene should look like an expensive handcrafted railway exhibition rather than a toy. Elegant composition with layered depth, atmospheric perspective, beautiful bokeh, soft reflections, believable scale cues, and premium commercial photography aesthetics. Calm, cozy, nostalgic, timeless, inviting, sophisticated, tactile, handcrafted, believable.",
-  "music_prompt": "",
+  "feeling": "I feel exhausted. And yearning peace. And I don't trust anything I've felt before. Like it's like wow how can i know so much or be right when it just leads to feeling this. So it's more of a release and surrendering. Like a neediness to be around people maybe. And to not be expected or relied upon. Not yet. Not like I can't do those things I just feel winded.",
+  "prompt": "Desired feeling\nI feel exhausted. And yearning peace. And I don't trust anything I've felt before. Like it's like wow how can i know so much or be right when it just leads to feeling this. So it's more of a release and surrendering. Like a neediness to be around people maybe. And to not be expected or relied upon. Not yet. Not like I can't do those things I just feel winded.\n\nImages in mind\nA snowy town. The snow so heavy it feels like insulation. A simplified world by the snow. No desire to be anywhere. No desire to be anything. But not running either. I guess seeing people for who they are, seeing them just go about their life?",
+  "music_prompt": "Instrumental [GENRE], no vocals, [BPM]. [BASS DESCRIPTION: character +\nmovement + mix position]. [PAD/TEXTURE LAYER, placed behind]. [LEAD OR\nORNAMENT: sparse]. [DRUM TREATMENT + density]. [PRODUCTION: reverb\ntype, saturation, stereo width]. [THREE MOOD ADJECTIVES]. [ONE IMAGE:\nplace, time of day, weather]. [SHAPE: build or no build].",
   "destinations": [
-    ""
+    "Evening Cottage"
   ],
   "cast": [
     {
@@ -69,5 +69,9 @@
       "image": "",
       "note": ""
     }
-  ]
+  ],
+  "image_mind": "A snowy town. The snow so heavy it feels like insulation. A simplified world by the snow. No desire to be anywhere. No desire to be anything. But not running either. I guess seeing people for who they are, seeing them just go about their life? \n\nMaybe even like a snowy cottage in a jar with a black background like display. With a bit of smoke coming from it. Or a heavily snowed upon street. or a cafe inside looking out with one or two people milling about. An air of no expectation and perhaps retreat. ",
+  "music_mind": "i'm thinking like a synth like artists A.L.I.S.O.N. and pastel ghost.. heavy snowfall making a scene for this. Stuff like Voyager too with \"Expresos Flamingo\". However you would describe that music. Dreamy, synth, reverb. ",
+  "image_style": "Museum-quality handcrafted miniature diorama, photographed as if it were a real physical scale model. Hyperrealistic miniature craftsmanship with meticulously detailed architecture, tiny handmade props, realistic wood grain, painted plaster, textured stone, brass, aged metals, woven fabrics, ceramic, glass, and miniature foliage. Every object feels tactile and hand-built rather than computer generated. Warm cinematic lighting with practical lamps, glowing windows, soft volumetric light, subtle bloom, rich golden highlights, and gentle shadows. Premium color grading featuring warm amber, honey, cream, walnut brown, muted greens, burnt orange, soft reds, and natural neutrals. No oversaturated colors. Tiny handcrafted human figures with realistic painted faces and clothing, posed naturally with subtle imperfections. Objects show slight wear and lived-in character instead of looking pristine. Highly realistic physical materials including glossy glass reflections, matte painted wood, textured brick, wet stone, polished brass, tiny leaves, moss, cloth fibers, and realistic weathering. The scene should look like an expensive handcrafted railway exhibition rather than a toy. Elegant composition with layered depth, atmospheric perspective, beautiful bokeh, soft reflections, believable scale cues, and premium commercial photography aesthetics. Calm, cozy, nostalgic, timeless, inviting, sophisticated, tactile, handcrafted, believable.",
+  "music_style": "Instrumental ethereal darkwave, no vocals, 68 BPM. Deep detuned saw\nbass with slow LFO filter sweeps, swelling and receding in waves,\nheavy sidechain pumping against the kick. Sub-heavy low end, bass\nforward in the mix. Icy analog pads far in the background, cold bell\ntones, sparse glassy arpeggio. Gated reverb drums, slow and cavernous,\nminimal percussion. Tape saturation, long decay, wide stereo.\n[MOOD]. [IMAGE]. No climax, no build, long fades."
 }
