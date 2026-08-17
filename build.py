@@ -1103,6 +1103,37 @@ def _edit_box_norm(edit: dict) -> tuple[float, float, float, float]:
     return x, y, w, height
 
 
+def _picture_cover_source(
+    image_w: int, image_h: int, frame_aspect: float = 3 / 2
+) -> tuple[float, float, float, float]:
+    """Visible source rect for object-fit:cover into the 3:2 picture frame."""
+    iw = max(1, int(image_w))
+    ih = max(1, int(image_h))
+    ir = iw / ih
+    if ir > frame_aspect:
+        sw = ih * frame_aspect
+        return (iw - sw) / 2, 0.0, sw, float(ih)
+    sh = iw / frame_aspect
+    return 0.0, (ih - sh) / 2, float(iw), sh
+
+
+def _region_to_image_pixels(
+    box: tuple[float, float, float, float], image_w: int, image_h: int
+) -> tuple[int, int, int, int]:
+    """Map a normalized 3:2-frame box onto source image pixels (cover-aware)."""
+    x, y, w, h = box
+    sx0, sy0, sw0, sh0 = _picture_cover_source(image_w, image_h)
+    sx = int(round(sx0 + x * sw0))
+    sy = int(round(sy0 + y * sh0))
+    sw = max(1, int(round(w * sw0)))
+    sh = max(1, int(round(h * sh0)))
+    sx = min(max(0, sx), max(0, image_w - 1))
+    sy = min(max(0, sy), max(0, image_h - 1))
+    sw = min(sw, max(1, image_w - sx))
+    sh = min(sh, max(1, image_h - sy))
+    return sx, sy, sw, sh
+
+
 def _cover_crop(im, tw: int, th: int):
     Image, _, _ = _pil()
     sw, sh = im.size
@@ -1154,11 +1185,8 @@ def fuse_still_edits(base: Path, edits: list[dict]) -> Path:
     canvas = Image.open(base).convert("RGBA")
     width, height = canvas.size
     for edit in edits:
-        x, y, w, h = _edit_box_norm(edit)
-        dx = int(round(x * width))
-        dy = int(round(y * height))
-        dw = max(1, int(round(w * width)))
-        dh = max(1, int(round(h * height)))
+        box = _edit_box_norm(edit)
+        dx, dy, dw, dh = _region_to_image_pixels(box, width, height)
         patch = _cover_crop(Image.open(edit["path"]).convert("RGBA"), dw, dh)
         if edit.get("soft_edges"):
             patch = _feather_rgba(patch)

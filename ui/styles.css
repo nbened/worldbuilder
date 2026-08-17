@@ -2614,14 +2614,14 @@ button {
 .picture-short {
   position: absolute;
   top: 10px;
-  z-index: 5;
+  z-index: 10;
 }
 
 .picture-image-picker {
   position: absolute;
   top: 10px;
   right: 46px;
-  z-index: 6;
+  z-index: 10;
 }
 
 .picture-pick {
@@ -2737,7 +2737,7 @@ button {
   position: absolute;
   top: 10px;
   left: 46px;
-  z-index: 5;
+  z-index: 10;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -3370,8 +3370,8 @@ button {
 }
 
 .anim-aspect-btn.landscape {
-  width: 34px;
-  height: 20px;
+  width: 32px;
+  height: 18px;
 }
 
 .anim-aspect-btn.portrait {
@@ -3431,6 +3431,30 @@ button {
   font-weight: 400;
   color: var(--faint);
   font-variant-numeric: tabular-nums;
+}
+
+.still-gen-model-select {
+  flex: none;
+  max-width: 58%;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--soft);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.still-gen-model-select:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.still-gen-model-select:focus {
+  outline: none;
+  box-shadow: var(--focus);
 }
 
 .still-gen-field {

@@ -72,6 +72,7 @@ const state = {
     jarToClaude: "", // Wonderjar → Claude (Veo) instruction
     status: "idle", // idle | prompting | imaging | error
     veoPrompt: "", // Claude → Veo prompt
+    veoModel: "", // selected Veo model id
     useClaude: true,
     promptDone: false,
     imageDone: false,
@@ -85,6 +86,7 @@ const state = {
     anthropic: "",
     openaiImage: "",
     veo: "",
+    veoModels: [],
   },
   /** Per-video API cost ledger (estimated) */
   ledger: {
@@ -1573,6 +1575,34 @@ function regionCropNorm(entry, video = null) {
   };
 }
 
+/** Visible source rect for object-fit:cover into the 3:2 picture frame. */
+function pictureCoverSource(imageW, imageH, frameAspect = 3 / 2) {
+  const iw = Math.max(1, Number(imageW) || 1);
+  const ih = Math.max(1, Number(imageH) || 1);
+  const ir = iw / ih;
+  if (ir > frameAspect) {
+    const sw = ih * frameAspect;
+    return { sx: (iw - sw) / 2, sy: 0, sw, sh: ih };
+  }
+  const sh = iw / frameAspect;
+  return { sx: 0, sy: (ih - sh) / 2, sw: iw, sh };
+}
+
+/** Map a normalized 3:2-frame box onto source image pixels (cover-aware). */
+function regionToImagePixels(box, imageW, imageH) {
+  const src = pictureCoverSource(imageW, imageH);
+  const sx = Math.round(src.sx + box.x * src.sw);
+  const sy = Math.round(src.sy + box.y * src.sh);
+  const sw = Math.max(1, Math.round(box.w * src.sw));
+  const sh = Math.max(1, Math.round(box.h * src.sh));
+  return {
+    sx: Math.min(Math.max(0, sx), Math.max(0, imageW - 1)),
+    sy: Math.min(Math.max(0, sy), Math.max(0, imageH - 1)),
+    sw: Math.min(sw, Math.max(1, imageW - Math.min(Math.max(0, sx), Math.max(0, imageW - 1)))),
+    sh: Math.min(sh, Math.max(1, imageH - Math.min(Math.max(0, sy), Math.max(0, imageH - 1)))),
+  };
+}
+
 function animCropNorm(entry, video = null) {
   return regionCropNorm(normalizeAnim(entry), video);
 }
@@ -1587,10 +1617,11 @@ async function exportRegionStill(entry, { clipboard = true, label = "region" } =
   try {
     const image = await loadImageElement(`/${imagePath}`);
     const box = regionCropNorm(entry);
-    const sx = Math.round(box.x * image.naturalWidth);
-    const sy = Math.round(box.y * image.naturalHeight);
-    const sw = Math.max(1, Math.round(box.w * image.naturalWidth));
-    const sh = Math.max(1, Math.round(box.h * image.naturalHeight));
+    const { sx, sy, sw, sh } = regionToImagePixels(
+      box,
+      image.naturalWidth,
+      image.naturalHeight
+    );
     const canvas = document.createElement("canvas");
     canvas.width = sw;
     canvas.height = sh;
@@ -1663,10 +1694,11 @@ async function cropSceneRegion(entry) {
   }
   const image = await loadImageElement(`/${imagePath}`);
   const box = regionCropNorm(entry);
-  const sx = Math.round(box.x * image.naturalWidth);
-  const sy = Math.round(box.y * image.naturalHeight);
-  const sw = Math.max(1, Math.round(box.w * image.naturalWidth));
-  const sh = Math.max(1, Math.round(box.h * image.naturalHeight));
+  const { sx, sy, sw, sh } = regionToImagePixels(
+    box,
+    image.naturalWidth,
+    image.naturalHeight
+  );
   const canvas = document.createElement("canvas");
   canvas.width = sw;
   canvas.height = sh;
@@ -1759,12 +1791,12 @@ function stillGenStep(label, { active = false, done = false } = {}) {
   );
 }
 
-function stillGenFieldLabel(text, model = "", { muted = true } = {}) {
+function stillGenFieldLabel(text, model = "", { muted = true, trailing = null } = {}) {
   return h(
     "div",
     { class: "still-gen-label-row" },
     h("span", { class: `still-gen-label${muted ? " muted" : ""}`, text }),
-    model && h("span", { class: "still-gen-model", text: model, title: model })
+    trailing || (model && h("span", { class: "still-gen-model", text: model, title: model }))
   );
 }
 
@@ -1797,10 +1829,14 @@ function stillGenCopyButton() {
   );
 }
 
-function stillGenPromptField(label, textareaProps = {}, { model = "", muted = true } = {}) {
+function stillGenPromptField(
+  label,
+  textareaProps = {},
+  { model = "", muted = true, trailing = null } = {}
+) {
   const { class: extraClass = "", ...rest } = textareaProps;
   return [
-    stillGenFieldLabel(label, model, { muted }),
+    stillGenFieldLabel(label, model, { muted, trailing }),
     h(
       "div",
       { class: "still-gen-field" },
@@ -1811,6 +1847,53 @@ function stillGenPromptField(label, textareaProps = {}, { model = "", muted = tr
       })
     ),
   ];
+}
+
+const VEO_MODEL_FALLBACK = [
+  { id: "veo-3.1-generate-preview", label: "Veo 3.1" },
+  { id: "veo-3.1-fast-generate-preview", label: "Veo 3.1 Fast" },
+  { id: "veo-3.0-generate-001", label: "Veo 3.0" },
+];
+
+function veoModelOptions() {
+  const list = state.models?.veoModels;
+  return Array.isArray(list) && list.length ? list : VEO_MODEL_FALLBACK;
+}
+
+function currentVeoModel() {
+  const options = veoModelOptions();
+  const ids = new Set(options.map((item) => item.id));
+  const picked = state.animGen?.veoModel || state.models?.veo || "";
+  if (ids.has(picked)) return picked;
+  return options[0]?.id || "veo-3.1-fast-generate-preview";
+}
+
+function veoModelSelect({ disabled = false } = {}) {
+  const options = veoModelOptions();
+  const value = currentVeoModel();
+  return h(
+    "select",
+    {
+      class: "still-gen-model-select",
+      "aria-label": "Veo model",
+      title: value,
+      disabled,
+      value,
+      onChange: (event) => {
+        const next = event.target.value;
+        state.animGen = { ...(state.animGen || {}), veoModel: next };
+        if (state.models) state.models.veo = next;
+        render();
+      },
+    },
+    ...options.map((item) =>
+      h("option", {
+        value: item.id,
+        selected: item.id === value,
+        text: item.label || item.id,
+      })
+    )
+  );
 }
 
 function beginEditPanelDrag(event, kind = "still") {
@@ -1872,6 +1955,7 @@ function resetAnimGen(partial = {}) {
     jarToClaude: DEFAULT_JAR_TO_CLAUDE_VEO,
     status: "idle",
     veoPrompt: "",
+    veoModel: prev.veoModel || state.models?.veo || "",
     useClaude: prev.useClaude !== false,
     promptDone: false,
     imageDone: false,
@@ -2097,6 +2181,7 @@ async function runAnimVideoFromPrompt(index, { veoPrompt = "", stem = "", crop =
         image_b64: region.image_b64,
         media_type: region.media_type,
         aspect_ratio: region.aspect_ratio,
+        model: currentVeoModel(),
         name,
         video: state.videoId,
       }),
@@ -2409,10 +2494,11 @@ async function composeFusedSceneCanvas() {
   for (const edit of edits) {
     const patch = await loadImageElement(`/${edit.file}`);
     const box = regionCropNorm(edit);
-    const dx = Math.round(box.x * canvas.width);
-    const dy = Math.round(box.y * canvas.height);
-    const dw = Math.max(1, Math.round(box.w * canvas.width));
-    const dh = Math.max(1, Math.round(box.h * canvas.height));
+    const { sx: dx, sy: dy, sw: dw, sh: dh } = regionToImagePixels(
+      box,
+      canvas.width,
+      canvas.height
+    );
     const temp = document.createElement("canvas");
     temp.width = dw;
     temp.height = dh;
@@ -3798,11 +3884,17 @@ function landingCopy() {
 async function loadModels() {
   try {
     const data = await (await fetch("/api/config")).json();
+    const veoModels = Array.isArray(data.veo_models) ? data.veo_models : VEO_MODEL_FALLBACK;
+    const veo = data.veo_model || veoModels[0]?.id || "";
     state.models = {
       anthropic: data.anthropic_model || "",
       openaiImage: data.openai_image_model || "",
-      veo: data.veo_model || "",
+      veo,
+      veoModels,
     };
+    if (!state.animGen?.veoModel) {
+      state.animGen = { ...(state.animGen || {}), veoModel: veo };
+    }
   } catch {
     /* optional chrome */
   }
@@ -9732,6 +9824,7 @@ function animSlotDial(entry, index) {
       jarToClaude: DEFAULT_JAR_TO_CLAUDE_VEO,
       status: "idle",
       veoPrompt: "",
+      veoModel: currentVeoModel(),
       useClaude: true,
       promptDone: false,
       imageDone: false,
@@ -9803,7 +9896,7 @@ function animSlotDial(entry, index) {
             patchAnimGen({ veoPrompt: event.target.value, error: "" }, { redraw: false });
           },
         },
-        { model: state.models?.veo || "" }
+        { trailing: veoModelSelect({ disabled: busy }) }
       ),
       h(
         "label",
@@ -9954,7 +10047,12 @@ function pendingAnimSlotDial(entry, index) {
 
 function filledAnimSlotDial(entry, index, { chrome = true } = {}) {
   const setAspect = (next) => {
-    entry.aspect = entry.aspect === next ? "native" : next;
+    if (entry.aspect === next) {
+      entry.aspect = "native";
+      changed();
+      return;
+    }
+    applyAnimAspect(entry, next);
     changed();
   };
   return [

@@ -70,11 +70,31 @@ IMAGE_FLAT_COST_USD = {
 }
 
 # Flat USD guesstimates for Veo (no dollar amount in API response)
+VEO_MODELS = [
+    {"id": "veo-3.1-generate-preview", "label": "Veo 3.1"},
+    {"id": "veo-3.1-fast-generate-preview", "label": "Veo 3.1 Fast"},
+    {"id": "veo-3.0-generate-001", "label": "Veo 3.0"},
+]
+VEO_MODEL_IDS = {entry["id"] for entry in VEO_MODELS}
 VEO_FLAT_COST_USD = {
     "veo-3.1-generate-preview": 1.2,
     "veo-3.1-fast-generate-preview": 0.6,
     "veo-3.0-generate-001": 1.0,
 }
+
+
+def default_veo_model() -> str:
+    model = (os.environ.get("VEO_MODEL") or "veo-3.1-fast-generate-preview").strip()
+    if model in VEO_MODEL_IDS:
+        return model
+    return "veo-3.1-fast-generate-preview"
+
+
+def resolve_veo_model(requested: str | None = None) -> str:
+    model = (requested or "").strip()
+    if model in VEO_MODEL_IDS:
+        return model
+    return default_veo_model()
 
 
 def load_dotenv(path: Path | None = None) -> None:
@@ -1533,14 +1553,13 @@ def veo_generate_video(
     media_type: str = "image/png",
     aspect_ratio: str = "16:9",
     duration_seconds: int = 4,
+    model: str | None = None,
 ) -> tuple[bytes, str, str, dict]:
     """Generate a short video with Veo from a still crop. Returns (bytes, ext, model, meta)."""
     key = (os.environ.get("GEMINI_API_KEY") or "").strip()
     if not key:
         raise RuntimeError("GEMINI_API_KEY is not set")
-    model = (
-        os.environ.get("VEO_MODEL") or "veo-3.1-generate-preview"
-    ).strip() or "veo-3.1-generate-preview"
+    model = resolve_veo_model(model)
     if media_type not in {"image/png", "image/jpeg", "image/webp"}:
         media_type = "image/png"
     if aspect_ratio not in {"16:9", "9:16"}:
@@ -1842,10 +1861,8 @@ class Handler(BaseHTTPRequestHandler):
                     "openai_image_model": openai_image_model(),
                     "openai_image_size": openai_image_size(),
                     "openai_image_quality": openai_image_quality(),
-                    "veo_model": (
-                        os.environ.get("VEO_MODEL") or "veo-3.1-fast-generate-preview"
-                    ).strip()
-                    or "veo-3.1-fast-generate-preview",
+                    "veo_model": default_veo_model(),
+                    "veo_models": VEO_MODELS,
                 }
             )
             return
@@ -2392,6 +2409,7 @@ class Handler(BaseHTTPRequestHandler):
         video_id = str(payload.get("video") or "").strip() or None
         aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip() or "16:9"
         duration_seconds = int(payload.get("duration_seconds") or 4)
+        model = resolve_veo_model(str(payload.get("model") or ""))
         try:
             image_bytes = base64.b64decode(image_b64, validate=False)
         except Exception:
@@ -2409,6 +2427,7 @@ class Handler(BaseHTTPRequestHandler):
                 media_type=media_type,
                 aspect_ratio=aspect_ratio,
                 duration_seconds=duration_seconds,
+                model=model,
             )
         except RuntimeError as exc:
             self.send_json({"error": str(exc)}, status=502)
