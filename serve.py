@@ -356,18 +356,42 @@ def probe_video_size(path: Path) -> tuple[int, int] | None:
 
 
 SHORT_BRAND_PNG = UI / "short-brand.png"
-SHORT_BRAND_VERSION = 2
+SHORT_BRAND_VERSION = 4
+SHORT_CROP_VERSION = 2  # 2 = cx is the 9:16 window center (matches the editor overlay)
 SHORT_W, SHORT_H = 1080, 1920
 
 
-def short_brand_overlay() -> Path:
-    """Full-frame transparent PNG: Fraunces wordmark at the bottom of the 9:16 frame."""
-    if SHORT_BRAND_PNG.exists():
-        return SHORT_BRAND_PNG
-    cache = ROOT / ".cache" / f"short-brand-v{SHORT_BRAND_VERSION}.png"
-    if cache.exists():
-        return cache
-    raise RuntimeError("missing ui/short-brand.png")
+def short_brand_side(value: str | None) -> str:
+    name = (value or "top").strip().lower()
+    return "bottom" if name == "bottom" else "top"
+
+
+def short_brand_overlay(side: str = "top") -> Path:
+    """Full-frame transparent PNG: Fraunces wordmark at the top or bottom."""
+    side = short_brand_side(side)
+    if not SHORT_BRAND_PNG.exists():
+        cache = ROOT / ".cache" / f"short-brand-v{SHORT_BRAND_VERSION}.png"
+        if cache.exists():
+            top = cache
+        else:
+            raise RuntimeError("missing ui/short-brand.png")
+    else:
+        top = SHORT_BRAND_PNG
+    if side != "bottom":
+        return top
+    ROOT.joinpath(".cache").mkdir(parents=True, exist_ok=True)
+    bottom = ROOT / ".cache" / f"short-brand-v{SHORT_BRAND_VERSION}-bottom.png"
+    if bottom.exists() and bottom.stat().st_mtime_ns >= top.stat().st_mtime_ns:
+        return bottom
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(top), "-vf", "vflip", str(bottom)],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not bottom.exists():
+        detail = (proc.stderr or proc.stdout or "ffmpeg failed").strip()
+        raise RuntimeError(detail.splitlines()[-1] if detail else "could not flip brand overlay")
+    return bottom
 
 
 def make_scene_short(
@@ -377,6 +401,7 @@ def make_scene_short(
     cx: float = 0.5,
     start: float = 0.0,
     duration: float | None = None,
+    brand_side: str = "top",
 ) -> Path:
     """Clip the processed scene MP4 to the 9:16 window, then stamp Wonderjar on top."""
     size = probe_video_size(source)
@@ -389,13 +414,16 @@ def make_scene_short(
     if crop_w > width:
         crop_w = width - (width % 2)
         crop_h = int(round(crop_w * 16 / 9 / 2) * 2)
+    # `cx` is the center of the 9:16 window in normalized picture width
+    # (same as the editor overlay), not a 0–1 lerp of crop X.
     cx = min(1.0, max(0.0, float(cx)))
-    x = int(round((width - crop_w) * cx))
+    x = int(round(width * cx - crop_w / 2))
     y = int(round((height - crop_h) * 0.5))
     x = max(0, min(width - crop_w, x))
     y = max(0, min(height - crop_h, y))
     x -= x % 2
     y -= y % 2
+    brand_side = short_brand_side(brand_side)
 
     start = max(0.0, float(start or 0.0))
     dur = None if duration is None else max(0.05, float(duration))
@@ -428,6 +456,8 @@ def make_scene_short(
                             )
                             and saved.get("crop") == [crop_w, crop_h, x, y]
                             and saved.get("brand") == SHORT_BRAND_VERSION
+                            and saved.get("crop_version") == SHORT_CROP_VERSION
+                            and saved.get("brand_side") == brand_side
                         ):
                             return target
                     except (OSError, json.JSONDecodeError, TypeError, ValueError):
@@ -435,7 +465,7 @@ def make_scene_short(
         except OSError:
             pass
 
-    brand = short_brand_overlay()
+    brand = short_brand_overlay(brand_side)
     vf = (
         f"[0:v]crop={crop_w}:{crop_h}:{x}:{y},"
         f"scale={SHORT_W}:{SHORT_H}:flags=lanczos,setsar=1[v];"
@@ -484,6 +514,8 @@ def make_scene_short(
                 "duration": dur,
                 "crop": [crop_w, crop_h, x, y],
                 "brand": SHORT_BRAND_VERSION,
+                "brand_side": brand_side,
+                "crop_version": SHORT_CROP_VERSION,
             }
         )
     )
@@ -601,6 +633,51 @@ def load_script(path: Path) -> dict:
     if not path.exists():
         return {}
     return json.loads(path.read_text())
+
+
+def save_script(path: Path, script: dict) -> None:
+    text = json.dumps(script, indent=2, ensure_ascii=False) + "\n"
+    if path.exists():
+        backup = path.with_suffix(".json.bak")
+        shutil.copyfile(path, backup)
+    path.write_text(text)
+
+
+def move_scene_to_video(from_video_id: str, to_video_id: str, scene_index: int) -> dict | None:
+    if from_video_id == to_video_id:
+        return None
+    from_path = video_file(from_video_id)
+    to_path = video_file(to_video_id)
+    if not from_path or not to_path or not from_path.exists() or not to_path.exists():
+        return None
+    from_script = load_script(from_path)
+    scenes = from_script.get("scenes")
+    if not isinstance(scenes, list):
+        return None
+    if scene_index < 0 or scene_index >= len(scenes):
+        return None
+    scene = scenes[scene_index]
+    if scene.get("is_transition"):
+        return None
+    normal_left = sum(
+        1 for i, entry in enumerate(scenes) if i != scene_index and not entry.get("is_transition")
+    )
+    if normal_left < 1:
+        return None
+    to_script = load_script(to_path)
+    to_scenes = to_script.setdefault("scenes", [])
+    if not isinstance(to_scenes, list):
+        return None
+    scenes.pop(scene_index)
+    to_scenes.append(scene)
+    save_script(from_path, from_script)
+    save_script(to_path, to_script)
+    return {
+        "from": from_video_id,
+        "to": to_video_id,
+        "fromSceneCount": len(scenes),
+        "toSceneIndex": len(to_scenes) - 1,
+    }
 
 
 def script_duration(script: dict) -> float:
@@ -1971,9 +2048,17 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     self.send_error(400, "duration must be a number")
                     return
+            brand_side = short_brand_side((self.query().get("brand") or ["top"])[0])
             target = short_output_path(script, scene)
             try:
-                make_scene_short(source, target, cx=cx, start=start, duration=duration)
+                make_scene_short(
+                    source,
+                    target,
+                    cx=cx,
+                    start=start,
+                    duration=duration,
+                    brand_side=brand_side,
+                )
             except RuntimeError as exc:
                 self.send_error(500, str(exc))
                 return
@@ -2074,6 +2159,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "name this video"}, status=400)
                 return
             self.send_json(created)
+            return
+        if route == "/api/move-scene":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                payload = json.loads(self.rfile.read(length)) if length else {}
+            except json.JSONDecodeError as exc:
+                self.send_json({"error": f"invalid JSON: {exc}"}, status=400)
+                return
+            from_id = str(payload.get("from") or "").strip()
+            to_id = str(payload.get("to") or "").strip()
+            try:
+                scene_index = int(payload.get("scene"))
+            except (TypeError, ValueError):
+                self.send_json({"error": "scene must be an integer index"}, status=400)
+                return
+            if not from_id or not to_id:
+                self.send_json({"error": "from and to videos are required"}, status=400)
+                return
+            moved = move_scene_to_video(from_id, to_id, scene_index)
+            if not moved:
+                self.send_json(
+                    {"error": "could not move scene — check videos, index, and keep at least one scene"},
+                    status=400,
+                )
+                return
+            self.send_json({"moved": True, **moved})
             return
         if route != "/api/render":
             self.send_error(404)

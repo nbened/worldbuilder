@@ -1,0 +1,154 @@
+{
+  "project": "Winter Cozy",
+  "jar": "rainy-jazz",
+  "output": {
+    "file": "out/winter-cozy.mp4",
+    "width": 1620,
+    "height": 1080,
+    "fps": 30
+  },
+  "defaults": {
+    "fade_seconds": 3,
+    "track_crossfade": 2,
+    "open_close_fade": 2,
+    "map_seconds": 30
+  },
+  "scenes": [
+    {
+      "title": "Scene 1",
+      "image": "",
+      "map": {
+        "seconds": 30
+      },
+      "pan": "none",
+      "zoom": 1,
+      "tracks": [],
+      "sounds": [],
+      "effects": [],
+      "animations": [],
+      "is_transition": false,
+      "transition_in": "fade",
+      "transition_out": "fade",
+      "fade_zoom": null,
+      "image_prompt": "",
+      "generated_prompt": "",
+      "music_prompt": ""
+    },
+    {
+      "title": "Cottage",
+      "image": "assets/images/cotrage.png",
+      "map": {
+        "seconds": 30
+      },
+      "pan": "none",
+      "zoom": 1,
+      "tracks": [
+        "assets/music/Blue Hour Drifts.mp3"
+      ],
+      "sounds": [],
+      "effects": [
+        {
+          "file": "assets/effects/snowfall-heavy.mp4",
+          "speed": 85,
+          "opacity": 100
+        }
+      ],
+      "animations": [
+        {
+          "file": "assets/animations/cotrage-loop-3.mp4",
+          "x": 0.7509754282810686,
+          "y": 0.00019952645720822582,
+          "w": 0.14208729175740417,
+          "h": 0.3788994446864111,
+          "brightness": 100,
+          "saturation": 100,
+          "speed": 60,
+          "aspect": "portrait",
+          "soft_edges": true,
+          "locked": true,
+          "loop_in": null,
+          "loop_out": 4,
+          "flip": "right"
+        },
+        {
+          "file": "assets/animations/cotrage-loop-2.mp4",
+          "x": 0.06852497096399536,
+          "y": 0.4830887957317073,
+          "w": 0.6118047489998709,
+          "h": 0.5162102569686411,
+          "brightness": 100,
+          "saturation": 100,
+          "speed": 80,
+          "aspect": "landscape",
+          "soft_edges": true,
+          "locked": true,
+          "loop_in": null,
+          "loop_out": null,
+          "flip": "right"
+        }
+      ],
+      "is_transition": false,
+      "transition_in": "fade",
+      "transition_out": "fade",
+      "fade_zoom": null,
+      "image_prompt": "",
+      "generated_prompt": "",
+      "music_prompt": "",
+      "edits": []
+    },
+    {
+      "title": "Back at Port",
+      "image": "assets/images/ChatGPT Image Aug 16, 2026, 07_47_07 PM.png",
+      "map": {
+        "seconds": 30
+      },
+      "pan": "none",
+      "zoom": 1,
+      "tracks": [],
+      "sounds": [],
+      "effects": [],
+      "animations": [
+        {
+          "file": "assets/animations/ChatGPT Image Aug 16, 2026, 07_47_07 PM-anim-1786936801274.mp4",
+          "x": 0.00014518002322880372,
+          "y": 0.49072004567324834,
+          "w": 0.31970499354587606,
+          "h": 0.269751088304333,
+          "brightness": 100,
+          "saturation": 100,
+          "speed": 100,
+          "aspect": "landscape",
+          "soft_edges": false,
+          "locked": true,
+          "loop_in": null,
+          "loop_out": null,
+          "flip": "right"
+        },
+        {
+          "file": "assets/animations/ChatGPT-Image-Aug-16-2026-07_47_07-PM-loop-2.mp4",
+          "x": 0.23145778890824623,
+          "y": 0.07374237804878048,
+          "w": 0.5770633710801394,
+          "h": 0.48689721934886765,
+          "brightness": 100,
+          "saturation": 100,
+          "speed": 100,
+          "aspect": "landscape",
+          "soft_edges": true,
+          "locked": true,
+          "loop_in": null,
+          "loop_out": 1.65,
+          "flip": "right"
+        }
+      ],
+      "is_transition": false,
+      "transition_in": "fade",
+      "transition_out": "fade",
+      "fade_zoom": null,
+      "image_prompt": "",
+      "music_prompt": "",
+      "generated_prompt": "",
+      "edits": []
+    }
+  ]
+}

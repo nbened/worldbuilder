@@ -35,7 +35,8 @@
       },
       "image_prompt": "",
       "music_prompt": "",
-      "sounds": []
+      "sounds": [],
+      "generated_prompt": ""
     },
     {
       "title": "Riverbend Station",
@@ -103,7 +104,8 @@
           "soft_edges": false,
           "locked": true
         }
-      ]
+      ],
+      "generated_prompt": ""
     },
     {
       "is_transition": true,
@@ -127,7 +129,8 @@
       },
       "image_prompt": "",
       "music_prompt": "",
-      "sounds": []
+      "sounds": [],
+      "generated_prompt": ""
     },
     {
       "title": "Waterfront",
@@ -146,24 +149,9 @@
       "effects": [],
       "animations": [
         {
-          "file": "assets/animations/babblingbrook.mov",
-          "x": 0,
-          "y": 0.000244140625,
-          "w": 0.32823418222821604,
-          "h": null,
-          "brightness": 100,
-          "saturation": 100,
-          "speed": 100,
-          "aspect": "native",
-          "soft_edges": true,
-          "locked": false,
-          "loop_in": null,
-          "loop_out": null
-        },
-        {
           "file": "assets/animations/candles.mp4",
-          "x": 0.5712259855289421,
-          "y": 0.3599845621257485,
+          "x": 0.5713847761793486,
+          "y": 0.360460934076968,
           "w": 0.37715334955089824,
           "h": null,
           "brightness": 100,
@@ -173,12 +161,14 @@
           "soft_edges": true,
           "locked": false,
           "loop_in": null,
-          "loop_out": null
+          "loop_out": null,
+          "flip": "right"
         }
       ],
       "image_prompt": "SCENE: A cobblestone market street in a small autumn town, mid \nafternoon, at the height of a harvest market.\n\nA brick bookshop with tall lit windows and a gold-lettered sign \nreading RIVERBEND BOOKS anchors the right side of the frame, its \nshelves visible through the glass. Beside it a stone-fronted cafe with \na striped awning and a hanging sign reading CORNER COFFEE. A red and \nwhite striped market canopy stands on the left over tables of \npumpkins, gourds and preserves, with stacked hay bales and a wooden \nhandcart loaded with squash. A chalkboard menu leans against a crate.\n\nThirty or more handcrafted figures fill the street, standing in small \nclusters, browsing tables, carrying baskets, talking in pairs. Iron \nlamp posts line the cobbles. Drifts of fallen leaves gather along the \ngutters and between the stones. A shallow stream runs behind a wooden \nrailing on the far left, crossed by a low stone arch bridge, with more \nof the town receding uphill into soft focus beyond.\n\nLIGHT: Late afternoon, warm and low. Golden daylight rakes across the \ncobblestones from the left, casting long soft shadows. The shop \nwindows and street lamps are already lit, glowing warm amber against \nthe cooler daylight. Bright but not harsh, with rich falloff into the \nblurred background.\n\nCAST: One figure wears a dusty rose coat, the only cool pink in the \nframe, clearly distinct from the warm reds and rusts worn by others. \nShe stands near the market canopy with her back half turned, partly \nhidden behind a stack of hay bales. Small in frame, not the focal \npoint, and not centered.\n\nCAMERA: Elevated three-quarter view, roughly forty degrees above the \nstreet, close in, as if leaning over a model railway table. Never at \nthe figures' eye level. Shallow tilt-shift depth of field with the \nmarket stall and the near cobbles in sharp focus, the far end of the \nstreet and the bridge softly blurred.\n\nMOOD: Busy, warm, generous. The best hour of the best day of the \nseason, with the light already starting to go.",
       "music_prompt": "Gypsy jazz, minor swing. Lead acoustic archtop guitar playing a\nslinky chromatic descending melody, then fast single-note runs.\nSecond guitar driving hard la pompe rhythm, percussive and dry.\nUpright bass vamping on a repeating figure, hypnotic, staying on\none chord. Fiddle takes the second solo with heavy bow attack.\nD Phrygian dominant over a D7 flat 9 vamp, 104 BPM, swung. Dark,\ntense, propulsive. The harmony never resolves, it just keeps\ncircling. Menacing rather than cheerful. Builds in intensity\nwithout changing chord.",
-      "edits": []
+      "edits": [],
+      "generated_prompt": ""
     },
     {
       "is_transition": true,
@@ -202,7 +192,8 @@
       },
       "image_prompt": "",
       "music_prompt": "",
-      "sounds": []
+      "sounds": [],
+      "generated_prompt": ""
     },
     {
       "title": "Campfire",
@@ -213,9 +204,7 @@
       "pan": "none",
       "zoom": 1,
       "tracks": [
-        "assets/music/Campfire Minor 2.mp3",
-        "assets/music/Campfire - last warm night.mp3",
-        "assets/music/Campfire Minor.mp3"
+        "assets/music/Campfire Minor 2.mp3"
       ],
       "effects": [],
       "animations": [
@@ -232,7 +221,8 @@
           "soft_edges": true,
           "locked": false,
           "loop_in": null,
-          "loop_out": 10
+          "loop_out": 10,
+          "flip": "right"
         },
         {
           "file": "assets/animations/coffee stand.mp4",
@@ -247,7 +237,8 @@
           "soft_edges": true,
           "locked": false,
           "loop_in": null,
-          "loop_out": null
+          "loop_out": null,
+          "flip": "right"
         },
         {
           "file": "assets/animations/smoke.mov",
@@ -262,7 +253,8 @@
           "soft_edges": true,
           "locked": false,
           "loop_in": null,
-          "loop_out": 2.25
+          "loop_out": 2.25,
+          "flip": "right"
         }
       ],
       "sounds": [
@@ -273,7 +265,8 @@
       ],
       "image_prompt": "SCENE: A fire clearing on a wooded ridge above the town, at dusk.\n\nA ring of rough grey stones encircles a small campfire burning low \nand bright at the center of a gravel clearing. Four handcrafted \nfigures sit around it in weathered wooden Adirondack chairs, angled \ninward toward the flames, seated naturally with relaxed posture. A \nfifth figure sits slightly apart on a fallen log at the edge of the \nring. A stack of split logs rests to one side, a battered tin coffee \npot sits on a flat stone near the fire, and an iron lantern hangs \nunlit from a low branch.\n\nThe clearing is enclosed by pines and autumn maples in deep rust and \namber, with mossy rock outcrops and drifts of fallen leaves across \nthe gravel. Through a gap in the trees at the far edge of the frame, \nfar below and softly out of focus, a few warm lit windows of the \ntown are just visible, with the faint glow of a locomotive headlamp \non the rail line beyond.\n\nLIGHT: The campfire is the dominant light source and the scene is lit \nalmost entirely by it. Warm orange light falls across the stones, the \ngravel, the chairs, and the figures' faces and hands, falling off \nquickly into darkness at the edges of the clearing. Long soft shadows \nstretch outward from the fire ring. Above the treeline the sky is \ndeep dusk blue, the last cold light of the day, contrasting against \nthe warm firelight below.\n\nCAST: One figure wears a dusty rose coat, the only cool pink in the \nframe. She stands at the edge of the clearing near the stacked logs, \nhalf turned away, partially obscured by a chair back. She is small in \nframe and not the focal point.\n\nCAMERA: Elevated three-quarter view, roughly forty degrees above the \nclearing, close in, as if leaning over a model railway table. Never at \nthe figures' eye level. Shallow tilt-shift depth of field with the \nfire ring in sharp focus and the treeline and distant town softly \nblurred.\n\nMOOD: Quiet, intimate, the end of the day. Warm but with an ache \nunder it, the last good evening before the season turns.",
       "music_prompt": "Solo fingerpicked acoustic archtop guitar, close-mic'd and intimate.\nA single fiddle sustains a low drone far in the background, almost\ninaudible. No bass, no drums, no piano. D minor, 58 BPM, free and\nunhurried, slight rubato. Sparse, lots of space between phrases.\nVery quiet dynamics throughout, never builds.",
-      "edits": []
+      "edits": [],
+      "generated_prompt": ""
     },
     {
       "title": "Map",
@@ -342,7 +335,8 @@
       "music_prompt": "",
       "id": "t_h6iax3g5",
       "edits": [],
-      "fade_seconds": 2
+      "fade_seconds": 2,
+      "generated_prompt": ""
     }
   ],
   "overlays": {

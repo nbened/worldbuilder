@@ -93,6 +93,7 @@ class Scene:
     is_transition: bool = False
     transition_in: str = "fade"
     transition_out: str = "fade"
+    transition_fade: float | None = None  # crossfade duration entering this scene (assemble)
     # Silent map overlays on top of this scene's picture (times relative to scene start).
     # {image: Path, start: float, duration: float, fade_in: float, fade_out: float}
     bridge_overlays: list[dict] = field(default_factory=list)
@@ -475,9 +476,17 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
         title = cfg.get("title", f"Scene {index}")
         style_in = xfade_style(cfg.get("transition_in"))
         style_out = xfade_style(cfg.get("transition_out"))
+        transition_fade = optional_float(cfg.get("transition_fade"))
 
         if is_transition:
-            # Marker only — runtime lives on the neighboring scenes as a map overlay.
+            try:
+                edge_fade = float(cfg.get("fade_seconds", fade_seconds))
+            except (TypeError, ValueError):
+                edge_fade = fade_seconds
+            marker_fade = optional_float(cfg.get("transition_fade"))
+            if marker_fade is None:
+                marker_fade = edge_fade
+            # Marker only — fade crossfades or map overlays on neighboring scenes.
             scenes.append(
                 Scene(
                     index=index,
@@ -494,6 +503,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                     is_transition=True,
                     transition_in=style_in,
                     transition_out=style_out,
+                    transition_fade=marker_fade,
                 )
             )
             continue
@@ -535,7 +545,9 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                 continue
             speed = float(entry.get("speed", 100))
             speed = max(10.0, min(speed, 400.0))
-            effects.append({"path": resolve(root, source, "effect"), "speed": speed})
+            opacity = float(entry.get("opacity", 100))
+            opacity = max(0.0, min(opacity, 100.0))
+            effects.append({"path": resolve(root, source, "effect"), "speed": speed, "opacity": opacity})
 
         animations: list[dict] = []
         for entry in raw.get("animations") or []:
@@ -561,6 +573,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                 in_at = None
             if out_at is not None and out_at <= 0:
                 out_at = None
+            flip = "left" if entry.get("flip") == "left" else "right"
             animations.append(
                 {
                     "path": resolve(root, source, "animation"),
@@ -572,6 +585,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
                     "speed": speed,
                     "aspect": aspect,
                     "soft_edges": bool(entry.get("soft_edges", False)),
+                    "flip": flip,
                     "loop_in": in_at,
                     "loop_out": out_at,
                 }
@@ -848,6 +862,7 @@ def load_script(manifest_path: Path) -> tuple[dict, list[Scene], float]:
             is_transition=False,
             transition_in=style_in,
             transition_out=style_out,
+            transition_fade=transition_fade,
             bridge_overlays=bridge_overlays,
         )
         cursor = clock
@@ -888,10 +903,20 @@ def pan_filter(segment: Segment, width: int, height: int) -> str:
     return ",".join(chain)
 
 
+def effect_has_alpha(path: Path) -> bool:
+    """WebM effect clips are pre-keyed and carry their own alpha."""
+    return path.suffix.lower() == ".webm"
+
+
 def effect_key_filter(path: Path) -> str:
     """Chroma-key filter for green-screen effect clips."""
+    if effect_has_alpha(path):
+        return "format=yuva420p"
     name = path.name.lower()
     if "snow" in name:
+        if "realistic" in name or "heavy" in name:
+            # YouTube crushes white flakes into green-tinted blobs — map luma to white alpha.
+            return "format=rgba,geq=r='255':g='255':b='255':a='min(255,max(0,(p(X,Y)-102)*10))'"
         # Snow uses a darker green — leave alone for now.
         return "colorkey=0x109E0E:0.3:0.1"
     # Autumn leaves are near-pure #00FF00 / #00FF01.
@@ -917,15 +942,29 @@ def seamless_loop_clip(
     t1 = duration if end is None else max(t0 + 0.25, min(float(end), duration))
     clip_len = t1 - t0
     fade = min(fade, max(0.25, clip_len * 0.45))
+    alpha = effect_has_alpha(path)
+    pix = "yuva420p" if alpha else "yuv420p"
+    ext = ".webm" if alpha else ".mp4"
+    encode = (
+        ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", "28"]
+        if alpha
+        else [
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+        ]
+    )
     if clip_len <= fade + 0.05:
         if t0 <= 0.001 and t1 >= duration - 0.001:
             return path
         # Too short to crossfade — just emit the trimmed slice.
         stat = path.stat()
         token = hashlib.sha1(
-            f"{path}|{stat.st_mtime_ns}|{stat.st_size}|trim|{t0:.3f}|{t1:.3f}|{fps}".encode()
+            f"{path}|{stat.st_mtime_ns}|{stat.st_size}|trim|{t0:.3f}|{t1:.3f}|{fps}|{pix}".encode()
         ).hexdigest()[:16]
-        target = ANIM_LOOP_CACHE / f"{token}.mp4"
+        target = ANIM_LOOP_CACHE / f"{token}{ext}"
         if target.exists():
             return target
         ANIM_LOOP_CACHE.mkdir(parents=True, exist_ok=True)
@@ -935,11 +974,7 @@ def seamless_loop_clip(
                 "-ss", f"{t0:.3f}", "-to", f"{t1:.3f}",
                 "-i", str(path),
                 "-an",
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "18",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
+                *encode,
                 str(target),
             ]
         )
@@ -947,9 +982,9 @@ def seamless_loop_clip(
 
     stat = path.stat()
     token = hashlib.sha1(
-        f"{path}|{stat.st_mtime_ns}|{stat.st_size}|{fade:.3f}|{fps}|{t0:.3f}|{t1:.3f}".encode()
+        f"{path}|{stat.st_mtime_ns}|{stat.st_size}|{fade:.3f}|{fps}|{t0:.3f}|{t1:.3f}|{pix}".encode()
     ).hexdigest()[:16]
-    target = ANIM_LOOP_CACHE / f"{token}.mp4"
+    target = ANIM_LOOP_CACHE / f"{token}{ext}"
     if target.exists():
         return target
 
@@ -960,9 +995,9 @@ def seamless_loop_clip(
     loop_len = offset
     graph = (
         f"[0:v]trim=start={t0:.3f}:end={t1:.3f},setpts=PTS-STARTPTS,"
-        f"fps={fps},format=yuv420p[a];"
+        f"fps={fps},format={pix}[a];"
         f"[1:v]trim=start={t0:.3f}:end={t1:.3f},setpts=PTS-STARTPTS,"
-        f"fps={fps},format=yuv420p[b];"
+        f"fps={fps},format={pix}[b];"
         f"[a][b]xfade=transition=fade:duration={fade:.3f}:offset={offset:.3f}[xf];"
         f"[xf]trim=start={fade:.3f}:duration={loop_len:.3f},setpts=PTS-STARTPTS[v]"
     )
@@ -974,11 +1009,7 @@ def seamless_loop_clip(
             "-filter_complex", graph,
             "-map", "[v]",
             "-an",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "18",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
+            *encode,
             str(target),
         ]
     )
@@ -1030,6 +1061,10 @@ def parse_still_edits(root: Path, raw_edits) -> list[dict]:
     return edits
 
 
+def anim_flip_filter(anim: dict) -> str:
+    return ",hflip" if anim.get("flip") == "left" else ""
+
+
 def parse_animations(root: Path, raw_anims) -> list[dict]:
     """Normalize filled animation slots from a scene / transition template."""
     animations: list[dict] = []
@@ -1060,6 +1095,7 @@ def parse_animations(root: Path, raw_anims) -> list[dict]:
         h_val = None if height is None else float(height)
         if h_val is not None and h_val <= 0:
             h_val = None
+        flip = "left" if entry.get("flip") == "left" else "right"
         animations.append(
             {
                 "path": resolve(root, source, "animation"),
@@ -1072,6 +1108,7 @@ def parse_animations(root: Path, raw_anims) -> list[dict]:
                 "speed": speed,
                 "aspect": aspect,
                 "soft_edges": bool(entry.get("soft_edges", False)),
+                "flip": flip,
                 "loop_in": in_at,
                 "loop_out": out_at,
             }
@@ -1277,6 +1314,63 @@ def overlay_png_for(event: dict, height: int) -> Path:
             height=height,
         )
     return path
+
+
+def boundary_has_bridge(bridge_events: list[dict], cut_time: float) -> bool:
+    """True when a map overlay spans the cut between two scene clips."""
+    for event in bridge_events:
+        start = float(event["start"])
+        end = start + float(event["duration"])
+        if start - 0.05 <= cut_time <= end + 0.05:
+            return True
+    return False
+
+
+def gap_crossfade_seconds(
+    prev: Scene,
+    nxt: Scene,
+    all_scenes: list[Scene],
+    bridge_events: list[dict],
+    default_fade: float,
+) -> float:
+    """Crossfade when a fade transition bubble sits between two playable scenes."""
+    cut_time = prev.start + prev.audio_duration
+    if boundary_has_bridge(bridge_events, cut_time):
+        return 0.0
+    fade = None
+    for scene in all_scenes:
+        if not scene.is_transition:
+            continue
+        if scene.index <= prev.index or scene.index >= nxt.index:
+            continue
+        if (scene.transition_in or "fade").strip().lower() != "fade":
+            continue
+        fade = scene.transition_fade if scene.transition_fade is not None else default_fade
+        break
+    if fade is None:
+        return 0.0
+    fade = min(fade, prev.audio_duration * 0.45, nxt.audio_duration * 0.45)
+    return max(0.0, fade)
+
+
+def assemble_clip_duration(
+    playable: list[Scene],
+    all_scenes: list[Scene],
+    bridge_events: list[dict],
+    default_fade: float,
+) -> float:
+    if not playable:
+        return 0.0
+    total = sum(scene.audio_duration for scene in playable)
+    for index in range(1, len(playable)):
+        total -= gap_crossfade_seconds(
+            playable[index - 1],
+            playable[index],
+            all_scenes,
+            bridge_events,
+            default_fade,
+        )
+    return max(total, 0.0)
 
 
 def collect_bridge_overlays(scenes: list[Scene]) -> list[dict]:
@@ -1749,11 +1843,12 @@ def build_command(
                     pix = edge
                 else:
                     pix = "format=yuv420p"
+                flip_filter = anim_flip_filter(anim)
                 graph.append(
                     f"[{input_index}:v]fps={fps},"
                     f"setpts=PTS/{rate:.4f},"
                     f"trim=duration={hold:.3f},setpts=PTS-STARTPTS,"
-                    f"{scale}{bright_filter},"
+                    f"{scale}{bright_filter}{flip_filter},"
                     f"{pix}[{an}]"
                 )
                 graph.append(
@@ -1768,14 +1863,17 @@ def build_command(
                 hold = segment.hold + fade_out[position]
                 fx = f"fx{position}x{step}"
                 out = f"b{position}x{step}"
+                opacity = max(0.0, min(effect.get("opacity", 100) / 100.0, 1.0))
+                key_chain = f"{effect_key_filter(effect['path'])},format=yuva420p"
+                if opacity < 0.999:
+                    key_chain += f",colorchannelmixer=aa={opacity:.4f}"
                 graph.append(
                     f"[{input_index}:v]fps={fps},"
                     f"setpts=PTS/{rate:.4f},"
                     f"trim=duration={hold:.3f},setpts=PTS-STARTPTS,"
                     f"scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
                     f"crop={width}:{height},setsar=1,"
-                    f"{effect_key_filter(effect['path'])},"
-                    f"format=yuva420p[{fx}]"
+                    f"{key_chain}[{fx}]"
                 )
                 graph.append(
                     f"[{current}][{fx}]overlay=0:0:eof_action=repeat:format=auto[{out}]"
@@ -1900,13 +1998,14 @@ def build_command(
                         )
                     else:
                         pix = "format=rgba"
+                    flip_filter = anim_flip_filter(anim)
                     an = f"ba{step}x{anim_step}"
                     nxt = f"bm{step}x{anim_step + 1}"
                     graph.append(
                         f"[{anim_index}:v]fps={fps},"
                         f"setpts=PTS/{rate:.4f},"
                         f"trim=duration={duration:.3f},setpts=PTS-STARTPTS,"
-                        f"{scale}{bright_filter},"
+                        f"{scale}{bright_filter}{flip_filter},"
                         f"{pix}[{an}]"
                     )
                     graph.append(
@@ -2075,6 +2174,7 @@ def build_assemble_command(
     fps: int,
     open_close_fade: float,
     quality: dict,
+    default_fade: float = 3.0,
     overlays: dict | None = None,
 ) -> list[str]:
     """Stitch pre-rendered scene clips and burn map transitions on top."""
@@ -2154,23 +2254,61 @@ def build_assemble_command(
     if len(v_labels) == 1:
         video_out = f"[{v_labels[0]}]"
         audio_out = a_labels[0]
+        assembled = playable[0].audio_duration
     else:
-        joined_v = "".join(f"[{label}]" for label in v_labels)
-        joined_a = "".join(f"[{label}]" for label in a_labels)
-        graph.append(f"{joined_v}concat=n={len(v_labels)}:v=1:a=0[vcat]")
-        graph.append(f"{joined_a}concat=n={len(a_labels)}:v=0:a=1[acat]")
-        video_out = "[vcat]"
-        audio_out = "acat"
+        assembled = playable[0].audio_duration
+        video_current = f"[{v_labels[0]}]"
+        audio_current = a_labels[0]
+        for index in range(1, len(v_labels)):
+            fade = gap_crossfade_seconds(
+                playable[index - 1],
+                playable[index],
+                scenes,
+                bridge_events,
+                default_fade,
+            )
+            if fade > 0.01:
+                offset = assembled - fade
+                v_out = f"vx{index}"
+                graph.append(
+                    f"{video_current}[{v_labels[index]}]xfade=transition=fade:"
+                    f"duration={fade:.3f}:offset={offset:.3f}[{v_out}]"
+                )
+                video_current = f"[{v_out}]"
+                a_out = f"ax{index}"
+                graph.append(
+                    f"[{audio_current}][{a_labels[index]}]acrossfade="
+                    f"d={fade:.3f}:c1=tri:c2=tri[{a_out}]"
+                )
+                audio_current = a_out
+                assembled = offset + playable[index].audio_duration
+            else:
+                v_out = f"vc{index}"
+                graph.append(
+                    f"{video_current}[{v_labels[index]}]concat=n=2:v=1:a=0[{v_out}]"
+                )
+                video_current = f"[{v_out}]"
+                a_out = f"ac{index}"
+                graph.append(
+                    f"[{audio_current}][{a_labels[index]}]concat=n=2:v=0:a=1[{a_out}]"
+                )
+                audio_current = a_out
+                assembled += playable[index].audio_duration
+        video_out = video_current
+        audio_out = audio_current
+
+    assembled = assemble_clip_duration(playable, scenes, bridge_events, default_fade)
+    trim_total = assembled if assembled > 0.001 else total
 
     graph.append(
-        f"{video_out}trim=duration={total:.3f},setpts=PTS-STARTPTS,"
+        f"{video_out}trim=duration={trim_total:.3f},setpts=PTS-STARTPTS,"
         f"fade=t=in:st=0:d={open_close_fade:.3f},"
-        f"fade=t=out:st={max(total - open_close_fade, 0):.3f}:d={open_close_fade:.3f}[vbase]"
+        f"fade=t=out:st={max(trim_total - open_close_fade, 0):.3f}:d={open_close_fade:.3f}[vbase]"
     )
     graph.append(
-        f"[{audio_out}]atrim=duration={total:.3f},asetpts=PTS-STARTPTS,"
+        f"[{audio_out}]atrim=duration={trim_total:.3f},asetpts=PTS-STARTPTS,"
         f"afade=t=in:st=0:d={open_close_fade:.3f},"
-        f"afade=t=out:st={max(total - open_close_fade, 0):.3f}:d={open_close_fade:.3f}[a]"
+        f"afade=t=out:st={max(trim_total - open_close_fade, 0):.3f}:d={open_close_fade:.3f}[a]"
     )
 
     current = "vbase"
@@ -2256,13 +2394,14 @@ def build_assemble_command(
                     )
                 else:
                     pix = "format=rgba"
+                flip_filter = anim_flip_filter(anim)
                 an = f"ba{step}x{anim_step}"
                 nxt = f"bm{step}x{anim_step + 1}"
                 graph.append(
                     f"[{anim_index}:v]fps={fps},"
                     f"setpts=PTS/{rate:.4f},"
                     f"trim=duration={duration:.3f},setpts=PTS-STARTPTS,"
-                    f"{scale}{bright_filter},"
+                    f"{scale}{bright_filter}{flip_filter},"
                     f"{pix}[{an}]"
                 )
                 graph.append(
@@ -2521,6 +2660,7 @@ def main() -> int:
                 fps=fps,
                 open_close_fade=open_close,
                 quality=quality,
+                default_fade=float(defaults.get("fade_seconds", 3)),
                 overlays=script.get("overlays"),
             )
         except BuildError as exc:

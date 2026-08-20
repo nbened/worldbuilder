@@ -1,5 +1,5 @@
 {
-  "project": "Winter Dreamwave",
+  "project": "Winter Noir",
   "jar": "rainy-jazz",
   "output": {
     "file": "out/n.mp4",
@@ -15,59 +15,7 @@
   },
   "scenes": [
     {
-      "title": "Internal Coffee",
-      "image": "assets/images/ChatGPT Image Aug 16, 2026, 07_47_07 PM.png",
-      "map": {
-        "seconds": 30
-      },
-      "pan": "none",
-      "zoom": 1,
-      "tracks": [],
-      "sounds": [],
-      "effects": [],
-      "animations": [
-        {
-          "file": "assets/animations/ChatGPT Image Aug 16, 2026, 07_47_07 PM-anim-1786936801274.mp4",
-          "x": 0.00014518002322880372,
-          "y": 0.49072004567324834,
-          "w": 0.31970499354587606,
-          "h": 0.269751088304333,
-          "brightness": 100,
-          "saturation": 100,
-          "speed": 100,
-          "aspect": "landscape",
-          "soft_edges": false,
-          "locked": true,
-          "loop_in": null,
-          "loop_out": null
-        },
-        {
-          "file": "assets/animations/ChatGPT-Image-Aug-16-2026-07_47_07-PM-loop-2.mp4",
-          "x": 0.23145778890824623,
-          "y": 0.07374237804878048,
-          "w": 0.5770633710801394,
-          "h": 0.48689721934886765,
-          "brightness": 100,
-          "saturation": 100,
-          "speed": 100,
-          "aspect": "landscape",
-          "soft_edges": true,
-          "locked": true,
-          "loop_in": null,
-          "loop_out": 1.65
-        }
-      ],
-      "is_transition": false,
-      "transition_in": "fade",
-      "transition_out": "fade",
-      "fade_zoom": null,
-      "image_prompt": "",
-      "music_prompt": "",
-      "generated_prompt": "",
-      "edits": []
-    },
-    {
-      "title": "Scene 2",
+      "title": "Rails",
       "image": "assets/images/ChatGPT Image Aug 16, 2026, 08_24_50 PM.png",
       "map": {
         "seconds": 30
@@ -78,12 +26,7 @@
         "assets/music/Lamp in Snowfall.mp3"
       ],
       "sounds": [],
-      "effects": [
-        {
-          "file": "assets/effects/snowfall.mp4",
-          "speed": 80
-        }
-      ],
+      "effects": [],
       "animations": [
         {
           "file": "assets/animations/ChatGPT-Image-Aug-16-2026-08_24_50-PM-loop-2.mp4",
@@ -98,7 +41,8 @@
           "soft_edges": false,
           "locked": true,
           "loop_in": null,
-          "loop_out": null
+          "loop_out": null,
+          "flip": "right"
         }
       ],
       "is_transition": false,
@@ -111,53 +55,57 @@
       "edits": []
     },
     {
-      "title": "Cottage",
-      "image": "assets/images/cotrage.png",
+      "is_transition": true,
+      "transition_of": "t_np5mps8w",
+      "image_prompt": "",
+      "generated_prompt": "",
+      "music_prompt": "",
+      "fade_zoom": {
+        "include_start": true,
+        "include_end": true,
+        "start": {
+          "x": 0.15,
+          "y": 0.2,
+          "w": 0.25,
+          "h": 0.2109375
+        },
+        "end": {
+          "x": 0.44999999999999996,
+          "y": 0.2,
+          "w": 0.25,
+          "h": 0.2109375
+        },
+        "seconds": 3
+      },
+      "sounds": []
+    },
+    {
+      "title": "Firepit",
+      "image": "assets/images/ChatGPT Image Aug 17, 2026, 08_43_26 PM.png",
       "map": {
         "seconds": 30
       },
       "pan": "none",
       "zoom": 1,
-      "tracks": [
-        "assets/music/Blue Hour Drifts.mp3"
-      ],
+      "tracks": [],
       "sounds": [],
-      "effects": [
-        {
-          "file": "assets/effects/snowfall.mp4",
-          "speed": 75
-        }
-      ],
+      "effects": [],
       "animations": [
         {
-          "file": "assets/animations/cotrage-loop-3.mp4",
-          "x": 0.7509754282810686,
-          "y": 0,
-          "w": 0.14208729175740417,
-          "h": 0.3788994446864111,
+          "file": "assets/animations/ChatGPT-Image-Aug-17-2026-08_43_26-PM-loop.mp4",
+          "x": 0.4407442906001765,
+          "y": 0.5287540597008751,
+          "w": 0.5407622186672552,
+          "h": 0.45626812200049655,
           "brightness": 100,
           "saturation": 100,
-          "speed": 60,
-          "aspect": "portrait",
-          "soft_edges": true,
-          "locked": true,
-          "loop_in": null,
-          "loop_out": 4
-        },
-        {
-          "file": "assets/animations/cotrage-loop-2.mp4",
-          "x": 0.06852497096399536,
-          "y": 0.4830887957317073,
-          "w": 0.6118047489998709,
-          "h": 0.5162102569686411,
-          "brightness": 100,
-          "saturation": 100,
-          "speed": 65,
+          "speed": 100,
           "aspect": "landscape",
           "soft_edges": true,
           "locked": true,
           "loop_in": null,
-          "loop_out": null
+          "loop_out": null,
+          "flip": "right"
         }
       ],
       "is_transition": false,
@@ -168,11 +116,49 @@
       "generated_prompt": "",
       "music_prompt": "",
       "edits": []
+    },
+    {
+      "title": "Fade",
+      "image": "assets/images/ChatGPT Image Aug 16, 2026, 07_47_07 PM.png",
+      "map": {
+        "seconds": 0
+      },
+      "pan": "none",
+      "zoom": 1,
+      "tracks": [],
+      "sounds": [],
+      "effects": [],
+      "animations": [],
+      "is_transition": true,
+      "transition_in": "fade",
+      "transition_out": "fade",
+      "fade_zoom": {
+        "start": {
+          "x": 0.15,
+          "y": 0.2,
+          "w": 0.25,
+          "h": 0.2109375
+        },
+        "end": {
+          "x": 0.44999999999999996,
+          "y": 0.2,
+          "w": 0.25,
+          "h": 0.2109375
+        },
+        "include_start": true,
+        "include_end": true,
+        "seconds": 3
+      },
+      "image_prompt": "",
+      "generated_prompt": "",
+      "music_prompt": "",
+      "id": "t_np5mps8w",
+      "fade_seconds": 3
     }
   ],
   "overlays": {
     "credit": {
-      "enabled": true,
+      "enabled": false,
       "text": "Built with hearthbound.com",
       "x": 0.035,
       "y": 0.9,

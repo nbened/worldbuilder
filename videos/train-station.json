@@ -1,0 +1,78 @@
+{
+  "project": "Train Station",
+  "jar": "noir",
+  "output": {
+    "file": "out/train-station.mp4",
+    "width": 1620,
+    "height": 1080,
+    "fps": 30
+  },
+  "defaults": {
+    "fade_seconds": 3,
+    "track_crossfade": 2,
+    "open_close_fade": 2,
+    "map_seconds": 30
+  },
+  "scenes": [
+    {
+      "title": "Scene 1",
+      "image": "",
+      "map": {
+        "seconds": 30
+      },
+      "pan": "none",
+      "zoom": 1,
+      "tracks": [],
+      "sounds": [],
+      "effects": [],
+      "animations": [],
+      "is_transition": false,
+      "transition_in": "fade",
+      "transition_out": "fade",
+      "fade_zoom": null,
+      "image_prompt": "",
+      "generated_prompt": "",
+      "music_prompt": ""
+    }
+  ],
+  "overlays": {
+    "credit": {
+      "enabled": true,
+      "text": "Built with hearthbound.com",
+      "x": 0.035,
+      "y": 0.9,
+      "show_seconds": 5
+    },
+    "now_playing": {
+      "enabled": true,
+      "x": 0.58,
+      "y": 0.86,
+      "streaming_from": "hearthbound.com",
+      "show_seconds": 5
+    }
+  },
+  "feeling": "",
+  "image_mind": "",
+  "music_mind": "",
+  "image_style": "Museum-quality handcrafted miniature diorama, photographed as if it were a real physical scale model. Hyperrealistic miniature craftsmanship with meticulously detailed architecture, tiny handmade props, realistic wood grain, painted plaster, textured stone, brass, aged metals, woven fabrics, ceramic, glass, and miniature foliage. Every object feels tactile and hand-built rather than computer generated. Warm cinematic lighting with practical lamps, glowing windows, soft volumetric light, subtle bloom, rich golden highlights, and gentle shadows. Premium color grading featuring warm amber, honey, cream, walnut brown, muted greens, burnt orange, soft reds, and natural neutrals. No oversaturated colors. Tiny handcrafted human figures with realistic painted faces and clothing, posed naturally with subtle imperfections. Objects show slight wear and lived-in character instead of looking pristine. Highly realistic physical materials including glossy glass reflections, matte painted wood, textured brick, wet stone, polished brass, tiny leaves, moss, cloth fibers, and realistic weathering. The scene should look like an expensive handcrafted railway exhibition rather than a toy. Elegant composition with layered depth, atmospheric perspective, beautiful bokeh, soft reflections, believable scale cues, and premium commercial photography aesthetics. Calm, cozy, nostalgic, timeless, inviting, sophisticated, tactile, handcrafted, believable.",
+  "music_style": "",
+  "prompt": "",
+  "music_prompt": "",
+  "destinations": [
+    ""
+  ],
+  "cast": [
+    {
+      "image": "",
+      "note": ""
+    },
+    {
+      "image": "",
+      "note": ""
+    },
+    {
+      "image": "",
+      "note": ""
+    }
+  ]
+}

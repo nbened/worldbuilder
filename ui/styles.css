@@ -1910,9 +1910,29 @@ button {
   background: #fff;
 }
 
+.scene-card .move-video,
 .scene-card .trash {
   position: absolute;
   top: 10px;
+  z-index: 1;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--faint);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.scene-card .move-video {
+  right: 42px;
+}
+
+.scene-card .trash {
   right: 10px;
   z-index: 1;
   width: 28px;
@@ -1928,8 +1948,13 @@ button {
   opacity: 0;
 }
 
+.scene-card:hover .move-video,
 .scene-card:hover .trash {
   opacity: 1;
+}
+
+.scene-card .move-video:hover {
+  color: var(--link);
 }
 
 .scene-card .trash:hover {
@@ -1988,6 +2013,64 @@ button {
   border-radius: 8px;
   background: #e8e7e4;
   border: 1px solid var(--line-strong);
+}
+
+.transition-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.transition-add-row.is-active {
+  margin-top: 8px;
+}
+
+.transition-add-row.is-active .transition-fx-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.transition-add-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+.transition-add-row .transition-fx-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.transition-add-row .transition-fx-field.no-label > span {
+  display: none;
+}
+
+.transition-add-row .transition-fx-select {
+  width: 100%;
+}
+
+.transition-cancel {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.transition-fade-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(55, 53, 47, 0.1);
+}
+
+.transition-edit-fade {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 .transition-pool > .sequence-head {
@@ -2082,6 +2165,70 @@ button {
   justify-content: center;
   width: 24px;
   height: 24px;
+}
+
+.transition-dot.is-fade {
+  background: #787774;
+  box-shadow: 0 0 0 2px rgba(120, 119, 116, 0.25);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.transition-drop.transition-bubble-slot {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px dashed #c4554d;
+  background: rgba(196, 85, 77, 0.08);
+}
+
+.transition-drop.transition-bubble-slot:hover,
+.transition-drop.transition-bubble-slot:focus-visible {
+  background: rgba(196, 85, 77, 0.18);
+  border-style: solid;
+  outline: none;
+}
+
+.transition-drop.transition-bubble-slot::before {
+  display: none;
+}
+
+.video-sidebar .transition-gap-bubble {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  min-height: 36px;
+  padding: 2px 0;
+}
+
+.video-sidebar .transition-drop.transition-bubble-slot::before {
+  display: none;
+}
+
+.video-sidebar .transition-drop.transition-bubble-slot {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  margin: 0;
+  flex: none;
+}
+
+.scene-strip.is-placing-transition .transition-gap-bubble .transition-bubble-slot {
+  animation: transition-bubble-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes transition-bubble-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(196, 85, 77, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(196, 85, 77, 0);
+  }
 }
 
 .transition-dot {
@@ -2902,7 +3049,6 @@ button {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 8.5%;
   text-align: center;
   font-family: Fraunces, "Iowan Old Style", "Palatino Linotype", Palatino, serif;
   font-optical-sizing: auto;
@@ -2914,6 +3060,52 @@ button {
   text-shadow: 0 1px 2px rgba(20, 16, 12, 0.55);
   pointer-events: none;
   user-select: none;
+}
+
+.short-brand.is-top,
+.short-brand:not(.is-bottom) {
+  top: 13%;
+  bottom: auto;
+}
+
+.short-brand.is-bottom {
+  top: auto;
+  bottom: 13%;
+}
+
+.short-cut-brand-row {
+  align-items: center;
+}
+
+.short-brand-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid var(--line-strong);
+}
+
+.short-brand-btn {
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.short-brand-btn:hover {
+  color: var(--ink);
+}
+
+.short-brand-btn.on {
+  background: var(--link);
+  color: #fff;
 }
 
 .player .rail-short-range {
@@ -3272,6 +3464,12 @@ button {
   padding-bottom: 6px;
 }
 
+.effect-controls {
+  display: grid;
+  gap: 4px;
+  padding-bottom: 2px;
+}
+
 .effect-speed {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -3389,6 +3587,29 @@ button {
   box-shadow: inset 0 0 0 1px var(--link);
 }
 
+.anim-flip-btn {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--soft);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text);
+}
+
+.anim-flip-btn:hover {
+  border-color: var(--muted);
+}
+
+.anim-flip-btn.on {
+  border-color: var(--link);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--link);
+}
+
 .still-gen {
   display: flex;
   flex-direction: column;
@@ -3419,6 +3640,34 @@ button {
 .still-gen-label-row .still-gen-label {
   flex: 1;
   min-width: 0;
+}
+
+.still-gen-label-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  max-width: 62%;
+}
+
+.still-gen-field-collapse {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.still-gen-field-collapse:hover {
+  color: var(--ink);
+  background: rgba(55, 53, 47, 0.06);
 }
 
 .still-gen-model {
@@ -5238,6 +5487,29 @@ button {
   outline: none;
   border-color: var(--link);
   background: #fff;
+}
+
+.confirm-pick {
+  width: 100%;
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--soft);
+  font: inherit;
+  color: inherit;
+}
+
+.confirm-pick:focus {
+  outline: none;
+  border-color: var(--link);
+  background: #fff;
+}
+
+.scene-title-row .scene-move-video {
+  flex-shrink: 0;
+  font-size: 13px;
+  padding: 6px 10px;
 }
 
 .confirm-actions {

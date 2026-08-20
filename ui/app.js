@@ -38,6 +38,7 @@ const state = {
   regionKind: "animation", // "animation" | "still"
   regionAspect: "landscape", // landscape = 16:9, portrait = 9:16
   shortCut: null, // { open, cx, duration, pendingDownload } — 9:16 scene snip
+  shortBrand: "top", // Wonderjar stamp on shorts: "top" | "bottom"
   landingMuted: true, // landing hero starts muted for autoplay; speaker toggles
   detailsDirty: false,
   detailsOpen: false,
@@ -63,6 +64,8 @@ const state = {
     error: "",
     editIndex: null,
     collapsed: false,
+    jarCollapsed: true,
+    claudeCollapsed: false,
     panelX: null, // dragged panel position (px)
     panelY: null,
   },
@@ -79,6 +82,8 @@ const state = {
     error: "",
     animIndex: null,
     collapsed: false,
+    jarCollapsed: true,
+    veoCollapsed: false,
     panelX: null,
     panelY: null,
   },
@@ -214,14 +219,39 @@ function askName({
   });
 }
 
+function askPick({
+  title,
+  message,
+  choices = [],
+  confirmLabel = "Choose",
+  cancelLabel = "Cancel",
+} = {}) {
+  closeConfirm(false);
+  return new Promise((resolve) => {
+    state.confirm = {
+      title,
+      message,
+      confirmLabel,
+      cancelLabel,
+      pick: true,
+      choices,
+      resolve,
+    };
+    render();
+  });
+}
+
 function closeConfirm(ok) {
   const box = state.confirm;
   if (!box) return;
   const input = document.querySelector(".confirm-prompt");
+  const pick = document.querySelector(".confirm-pick");
   const typed = input ? String(input.value || "").trim() : "";
+  const picked = pick ? String(pick.value || "").trim() : "";
   state.confirm = null;
   render();
-  if (box.prompt) box.resolve(ok ? typed : null);
+  if (box.pick) box.resolve(ok ? picked || null : null);
+  else if (box.prompt) box.resolve(ok ? typed : null);
   else box.resolve(!!ok);
 }
 
@@ -253,9 +283,23 @@ function confirmBoxView() {
         },
       })
     : null;
+  const pick = box.pick
+    ? h(
+        "select",
+        {
+          id: "confirm-pick",
+          class: "confirm-pick",
+          "aria-label": "Choose a video",
+        },
+        ...(box.choices || []).map((choice) =>
+          h("option", { value: choice.id, text: choice.label })
+        )
+      )
+    : null;
   requestAnimationFrame(() => {
     if (document.activeElement?.closest(".confirm-box")) return;
     if (input) input.focus();
+    else if (pick) pick.focus();
     else cancelBtn.focus();
   });
   return h(
@@ -271,7 +315,7 @@ function confirmBoxView() {
       "div",
       {
         class: "confirm-box",
-        role: box.prompt ? "dialog" : "alertdialog",
+        role: box.prompt || box.pick ? "dialog" : "alertdialog",
         "aria-modal": "true",
         "aria-labelledby": "confirm-title",
         "aria-describedby": box.message ? "confirm-message" : undefined,
@@ -280,12 +324,13 @@ function confirmBoxView() {
       box.message &&
         h("p", { id: "confirm-message", class: "confirm-message", text: box.message }),
       input,
+      pick,
       h(
         "div",
         { class: "confirm-actions" },
         cancelBtn,
         h("button", {
-          class: box.prompt ? "btn primary" : "btn stop",
+          class: box.prompt || box.pick ? "btn primary" : "btn stop",
           type: "button",
           onClick: () => closeConfirm(true),
           text: box.confirmLabel || (box.prompt ? "Add" : "Delete"),
@@ -311,6 +356,24 @@ function trashIcon() {
     h("path", {
       d: "M3.5 4.5h9M6 4.5V3.2A1.2 1.2 0 0 1 7.2 2h1.6A1.2 1.2 0 0 1 10 3.2V4.5M5 4.5l.4 8.2A1 1 0 0 0 6.4 13.5h3.2a1 1 0 0 0 1-.8L11 4.5",
     })
+  );
+}
+
+function moveVideoIcon() {
+  return h(
+    "svg",
+    {
+      class: "icon",
+      viewBox: "0 0 16 16",
+      width: "14",
+      height: "14",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.4",
+      "aria-hidden": true,
+    },
+    h("path", { d: "M2.5 5.5h7M6 3l3.5 2.5L6 8" }),
+    h("path", { d: "M13.5 10.5h-7M10 13l-3.5-2.5L10 8" })
   );
 }
 
@@ -884,28 +947,24 @@ function blankScene() {
 
 function blankTransition() {
   const entry = blankScene();
-  const n = scenes().filter((scene) => isTransitionTemplate(scene)).length + 1;
   entry.is_transition = true;
   entry.id = newTransitionId();
-  entry.title = `Transition ${n}`;
+  entry.title = "Fade";
   entry.tracks = [];
-  entry.map = { seconds: DEFAULT_MAP_SECONDS };
-  entry.transition_in = "fade_zoom";
-  entry.transition_out = "fade_zoom";
-  entry.fade_zoom = {
-    seconds: DEFAULT_ZOOM_SECONDS,
-    include_start: true,
-    include_end: true,
-    start: defaultZoomRect(0.15, 0.2),
-    end: defaultZoomRect(0.5, 0.25),
-  };
+  entry.map = { seconds: 0 };
+  entry.transition_in = "fade";
+  entry.transition_out = "fade";
+  entry.fade_seconds = DEFAULT_FADE_SECONDS;
   return entry;
 }
 
 const TRANSITION_FX = [
   { id: "fade", label: "Fade" },
-  { id: "fade_zoom", label: "Fade zoom" },
+  { id: "fade_zoom", label: "Video transition" },
 ];
+
+/** Sidebar picker — fade only for now. */
+const TRANSITION_FX_PICKER = TRANSITION_FX.filter((fx) => fx.id === "fade");
 
 /** Normalized w/h for a 16:9 zoom rect inside the 3:2 picture frame. */
 function zoomRectNormWH() {
@@ -1011,8 +1070,27 @@ function transitionZoomDurationSeconds(entry) {
 
 function transitionStyleOf(entry) {
   entry = resolveTransition(entry) || entry;
-  const style = entry?.transition_in || entry?.transition_out || "fade_zoom";
-  return TRANSITION_FX.some((fx) => fx.id === style) ? style : "fade_zoom";
+  const style = entry?.transition_in || entry?.transition_out || "fade";
+  return TRANSITION_FX.some((fx) => fx.id === style) ? style : "fade";
+}
+
+function isFadeTransition(entry) {
+  return transitionStyleOf(entry) === "fade";
+}
+
+function findOrCreateFadeTemplate() {
+  const list = scenes();
+  let index = list.findIndex((scene) => isTransitionTemplate(scene) && isFadeTransition(scene));
+  if (index >= 0) return index;
+  list.push(blankTransition());
+  return list.length - 1;
+}
+
+function startPlacingTransition(type = "fade") {
+  if (type !== "fade") return;
+  state.placingTransition = findOrCreateFadeTemplate();
+  state.note = "Click a bubble between scenes to add a fade";
+  changed();
 }
 
 function transitionMapSeconds(entry) {
@@ -1101,8 +1179,8 @@ function transitionTiming(entry, index = null) {
   };
 }
 
-function transitionFxSelect(value, onPick, label) {
-  const current = value || "fade_zoom";
+function transitionFxSelect(value, onPick, label, options = TRANSITION_FX) {
+  const current = value || options[0]?.id || "fade";
   // Set .value after options exist — assigning beforehand is ignored by browsers.
   const select = h(
     "select",
@@ -1110,7 +1188,7 @@ function transitionFxSelect(value, onPick, label) {
       class: "transition-fx-select",
       onChange: (event) => onPick(event.target.value),
     },
-    TRANSITION_FX.map((fx) =>
+    options.map((fx) =>
       h("option", {
         value: fx.id,
         text: fx.label,
@@ -1119,7 +1197,12 @@ function transitionFxSelect(value, onPick, label) {
     )
   );
   select.value = current;
-  return h("label", { class: "transition-fx-field" }, h("span", { text: label }), select);
+  return h(
+    "label",
+    { class: `transition-fx-field${label ? "" : " no-label"}` },
+    label ? h("span", { text: label }) : null,
+    select
+  );
 }
 
 /** Per-variant Start/End include toggles — lives on the variant row. */
@@ -1198,46 +1281,76 @@ function transitionDurationFields(entry) {
   const timing = transitionTiming(placement);
   const fadeSecs = transitionFadeSeconds(cfg);
   const zoomStyle = transitionStyleOf(cfg) === "fade_zoom";
+  if (!zoomStyle) {
+    return h(
+      "div",
+      { class: "transition-duration-fields" },
+      h(
+        "label",
+        { class: "transition-map-hold" },
+        h("span", { text: "Duration" }),
+        h("input", {
+          type: "number",
+          min: "0",
+          step: "0.25",
+          value: String(fadeSecs),
+          title: "Crossfade overlap in seconds",
+          onChange: (event) => {
+            cfg.fade_seconds = Math.max(0, Number(event.target.value) || 0);
+            changed();
+          },
+        }),
+        h("span", { class: "transition-unit", text: "sec" })
+      ),
+      h("span", {
+        class: "meta transition-duration-total",
+        text: "Overlaps the end of one scene with the start of the next",
+      })
+    );
+  }
+  const showMap = zoomStyle;
   const showZoom = zoomStyle && (timing.hasStart || timing.hasEnd);
   return h(
     "div",
     { class: "transition-duration-fields" },
-    h(
-      "label",
-      { class: "transition-map-hold" },
-      h("span", { text: "Map" }),
-      h("input", {
-        type: "number",
-        min: "0",
-        step: "1",
-        value: String(timing.map),
-        title: "Map hold in seconds",
-        onChange: (event) => {
-          const next = Math.max(0, Number(event.target.value) || 0);
-          if (!cfg.map || typeof cfg.map !== "object") cfg.map = {};
-          cfg.map.seconds = next;
-          changed();
-        },
-      }),
-      h("span", { class: "transition-unit", text: "sec" })
-    ),
-    h(
-      "label",
-      { class: "transition-map-hold" },
-      h("span", { text: "Fade" }),
-      h("input", {
-        type: "number",
-        min: "0",
-        step: "0.25",
-        value: String(fadeSecs),
-        title: "Alpha fade in/out in seconds",
-        onChange: (event) => {
-          cfg.fade_seconds = Math.max(0, Number(event.target.value) || 0);
-          changed();
-        },
-      }),
-      h("span", { class: "transition-unit", text: "sec" })
-    ),
+    showMap &&
+      h(
+        "label",
+        { class: "transition-map-hold" },
+        h("span", { text: "Map" }),
+        h("input", {
+          type: "number",
+          min: "0",
+          step: "1",
+          value: String(timing.map),
+          title: "Map hold in seconds",
+          onChange: (event) => {
+            const next = Math.max(0, Number(event.target.value) || 0);
+            if (!cfg.map || typeof cfg.map !== "object") cfg.map = {};
+            cfg.map.seconds = next;
+            changed();
+          },
+        }),
+        h("span", { class: "transition-unit", text: "sec" })
+      ),
+    showMap &&
+      h(
+        "label",
+        { class: "transition-map-hold" },
+        h("span", { text: "Fade" }),
+        h("input", {
+          type: "number",
+          min: "0",
+          step: "0.25",
+          value: String(fadeSecs),
+          title: "Alpha fade in/out in seconds",
+          onChange: (event) => {
+            cfg.fade_seconds = Math.max(0, Number(event.target.value) || 0);
+            changed();
+          },
+        }),
+        h("span", { class: "transition-unit", text: "sec" })
+      ),
     showZoom &&
       h(
         "label",
@@ -1259,16 +1372,18 @@ function transitionDurationFields(entry) {
       ),
     h("span", {
       class: "meta transition-duration-total",
-      text:
-        timing.total > 0
-          ? `Total ${clock(timing.total)}${
-              timing.mode === "open"
-                ? ` · opens ${clock(timing.inHold)}`
-                : timing.mode === "close"
-                  ? ` · closes ${clock(timing.outHold)}`
-                  : ` · ${clock(timing.outHold)} before · ${clock(timing.inHold)} after`
-            }`
-          : "No overlay",
+        text:
+          timing.total > 0
+            ? `Total ${clock(timing.total)}${
+                timing.mode === "open"
+                  ? ` · opens ${clock(timing.inHold)}`
+                  : timing.mode === "close"
+                    ? ` · closes ${clock(timing.outHold)}`
+                    : ` · ${clock(timing.outHold)} before · ${clock(timing.inHold)} after`
+              }`
+            : zoomStyle
+              ? "No overlay"
+              : "Crossfade only — set duration under Between scenes",
     })
   );
 }
@@ -1396,11 +1511,13 @@ function soundEntry(path, index = state.sceneIndex) {
 }
 
 function normalizeEffect(entry) {
-  if (typeof entry === "string") return { file: entry, speed: 100 };
+  if (typeof entry === "string") return { file: entry, speed: 100, opacity: 100 };
   const speed = Number(entry?.speed);
+  const opacity = Number(entry?.opacity);
   return {
     file: entry?.file || "",
     speed: Number.isFinite(speed) ? Math.min(400, Math.max(10, speed)) : 100,
+    opacity: Number.isFinite(opacity) ? Math.min(100, Math.max(0, opacity)) : 100,
   };
 }
 
@@ -1429,6 +1546,7 @@ function normalizeAnim(entry) {
       locked: false,
       loop_in: null,
       loop_out: null,
+      flip: "right",
     };
   }
   const brightness = Number(entry.brightness);
@@ -1439,6 +1557,7 @@ function normalizeAnim(entry) {
   const loopIn = Number(entry.loop_in);
   const loopOut = Number(entry.loop_out);
   const height = Number(entry.h);
+  const flip = entry?.flip === "left" ? "left" : "right";
   return {
     file: entry.file || "",
     x: Number.isFinite(entry.x) ? entry.x : 0.36,
@@ -1455,6 +1574,7 @@ function normalizeAnim(entry) {
     // 0 means “unset / use the full clip”, not a zero-second out point.
     loop_in: Number.isFinite(loopIn) && loopIn > 0 ? Math.max(0, loopIn) : null,
     loop_out: Number.isFinite(loopOut) && loopOut > 0 ? Math.max(0, loopOut) : null,
+    flip,
   };
 }
 
@@ -1481,6 +1601,17 @@ function animCssFilter(entry) {
   const brightness = entry.brightness ?? 100;
   const saturation = entry.saturation ?? 100;
   return `brightness(${brightness}%) saturate(${saturation}%)`;
+}
+
+function animFlipTransform(entry) {
+  return entry?.flip === "left" ? "scaleX(-1)" : "";
+}
+
+function syncAnimFlip(index, entry) {
+  const transform = animFlipTransform(entry);
+  document.querySelectorAll(`video[data-anim="${CSS.escape(String(index))}"]`).forEach((video) => {
+    if (video.parentElement) video.parentElement.style.transform = transform;
+  });
 }
 
 function animSourceDuration(entry) {
@@ -1791,15 +1922,6 @@ function stillGenStep(label, { active = false, done = false } = {}) {
   );
 }
 
-function stillGenFieldLabel(text, model = "", { muted = true, trailing = null } = {}) {
-  return h(
-    "div",
-    { class: "still-gen-label-row" },
-    h("span", { class: `still-gen-label${muted ? " muted" : ""}`, text }),
-    trailing || (model && h("span", { class: "still-gen-model", text: model, title: model }))
-  );
-}
-
 function stillGenCopyButton() {
   return h(
     "button",
@@ -1829,24 +1951,62 @@ function stillGenCopyButton() {
   );
 }
 
+function stillGenFieldLabel(
+  text,
+  model = "",
+  { muted = true, trailing = null, collapsed = false, onToggleCollapse = null } = {}
+) {
+  return h(
+    "div",
+    { class: "still-gen-label-row" },
+    h("span", { class: `still-gen-label${muted ? " muted" : ""}`, text }),
+    h(
+      "div",
+      { class: "still-gen-label-actions" },
+      trailing || (model && h("span", { class: "still-gen-model", text: model, title: model })),
+      onToggleCollapse &&
+        h("button", {
+          class: "still-gen-field-collapse",
+          type: "button",
+          title: collapsed ? "Show prompt" : "Hide prompt",
+          "aria-label": collapsed ? "Show prompt" : "Hide prompt",
+          "aria-expanded": collapsed ? "false" : "true",
+          onClick: (event) => {
+            event.stopPropagation();
+            onToggleCollapse();
+          },
+          text: collapsed ? "▸" : "▾",
+        })
+    )
+  );
+}
+
 function stillGenPromptField(
   label,
   textareaProps = {},
-  { model = "", muted = true, trailing = null } = {}
+  {
+    model = "",
+    muted = true,
+    trailing = null,
+    collapsed = false,
+    onToggleCollapse = null,
+  } = {}
 ) {
   const { class: extraClass = "", ...rest } = textareaProps;
+  const canCollapse = !!onToggleCollapse;
   return [
-    stillGenFieldLabel(label, model, { muted, trailing }),
-    h(
-      "div",
-      { class: "still-gen-field" },
-      stillGenCopyButton(),
-      h("textarea", {
-        ...rest,
-        class: `brief-input ${extraClass}`.trim(),
-      })
-    ),
-  ];
+    stillGenFieldLabel(label, model, { muted, trailing, collapsed, onToggleCollapse }),
+    (!canCollapse || !collapsed) &&
+      h(
+        "div",
+        { class: "still-gen-field" },
+        stillGenCopyButton(),
+        h("textarea", {
+          ...rest,
+          class: `brief-input ${extraClass}`.trim(),
+        })
+      ),
+  ].filter(Boolean);
 }
 
 const VEO_MODEL_FALLBACK = [
@@ -4602,6 +4762,16 @@ function downloadOutput(sceneNumber = null) {
   window.location.href = url;
 }
 
+function shortBrandSide() {
+  return state.shortBrand === "bottom" ? "bottom" : "top";
+}
+
+function setShortBrandSide(side) {
+  state.shortBrand = side === "bottom" ? "bottom" : "top";
+  if (state.shortCut) state.shortCut.brand = state.shortBrand;
+  render();
+}
+
 function shortCutOpen() {
   return !!(state.shortCut && state.shortCut.open);
 }
@@ -4634,9 +4804,10 @@ function openShortCut() {
   state.selectedEdit = null;
   state.shortCut = {
     open: true,
-    cx: 0.5,
+    cx: state.shortCut?.cx > 0 ? state.shortCut.cx : 0.5,
     duration: state.shortCut?.duration > 0 ? state.shortCut.duration : 15,
     pendingDownload: false,
+    brand: shortBrandSide(),
   };
   state.note = "Drag the 9:16 frame, scrub the start, set duration, then Download";
   render();
@@ -4654,12 +4825,14 @@ function downloadShort(sceneNumber = state.sceneIndex + 1) {
   const cx = cut?.cx ?? 0.5;
   const start = Math.max(0, player.at || 0);
   const duration = Math.max(0.5, Number(cut?.duration) || 15);
+  const brand = shortBrandSide();
   const url =
     `/download-short?v=${encodeURIComponent(state.videoId)}` +
     `&scene=${encodeURIComponent(sceneNumber)}` +
     `&cx=${encodeURIComponent(String(cx))}` +
     `&start=${encodeURIComponent(String(start))}` +
-    `&duration=${encodeURIComponent(String(duration))}`;
+    `&duration=${encodeURIComponent(String(duration))}` +
+    `&brand=${encodeURIComponent(brand)}`;
   window.location.href = url;
   state.note = `Downloading ${duration}s 9:16 short…`;
   render();
@@ -4804,6 +4977,29 @@ function shortCutPanel() {
         class: "meta short-cut-end",
         text: `${clock(start)} → ${clock(end)}`,
       })
+    ),
+    h(
+      "div",
+      { class: "short-cut-row short-cut-brand-row" },
+      h("span", { class: "meta", text: "Wonderjar" }),
+      h(
+        "div",
+        { class: "short-brand-toggle", role: "group", "aria-label": "Wonderjar placement" },
+        h("button", {
+          class: `short-brand-btn${shortBrandSide() === "top" ? " on" : ""}`,
+          type: "button",
+          text: "Top",
+          title: "Stamp Wonderjar at the top (clears Instagram captions)",
+          onClick: () => setShortBrandSide("top"),
+        }),
+        h("button", {
+          class: `short-brand-btn${shortBrandSide() === "bottom" ? " on" : ""}`,
+          type: "button",
+          text: "Bottom",
+          title: "Stamp Wonderjar at the bottom",
+          onClick: () => setShortBrandSide("bottom"),
+        })
+      )
     ),
     h(
       "div",
@@ -6812,6 +7008,11 @@ function previewAnimLayer(entry) {
   });
   const frontWrap = h("div", { class: "anim-video-wrap is-front" }, primary);
   const backWrap = h("div", { class: "anim-video-wrap is-back" }, secondary);
+  const flipTransform = animFlipTransform(normalized);
+  if (flipTransform) {
+    frontWrap.style.transform = flipTransform;
+    backWrap.style.transform = flipTransform;
+  }
   muteVideo(primary);
   muteVideo(secondary);
   primary.playbackRate = rate;
@@ -7042,29 +7243,47 @@ function placeTransitionAfter(transIndex, afterSceneIndex) {
   if (!source.id) source.id = newTransitionId();
   if (!canPlaceTransitionAfter(afterSceneIndex)) {
     state.placingTransition = null;
-    state.note = "Pick a slot before, between, or after scenes";
+    state.note = "Pick a slot between scenes";
     render();
     return;
   }
-  // Linked variant — same map/timing; own zoom in/out rectangles.
-  const tz = normalizeFadeZoomBlock(source);
-  const variant = {
-    is_transition: true,
-    transition_of: source.id,
-    fade_zoom: {
-      include_start: tz.include_start,
-      include_end: tz.include_end,
-      start: { ...tz.start },
-      end: { ...tz.end },
-    },
-  };
+  const layoutGap = timelineLayout().find(
+    (row) => row.type === "gap" && row.afterIndex === afterSceneIndex
+  );
+  const existing = (layoutGap?.transitions || []).filter(isTimelineTransition);
+  if (isFadeTransition(source) && existing.length) {
+    state.placingTransition = null;
+    state.note = "This gap already has a transition";
+    render();
+    return;
+  }
+  const isFade = isFadeTransition(source);
+  const variant = isFade
+    ? { is_transition: true, transition_of: source.id }
+    : (() => {
+        const tz = normalizeFadeZoomBlock(source);
+        return {
+          is_transition: true,
+          transition_of: source.id,
+          fade_zoom: {
+            include_start: tz.include_start,
+            include_end: tz.include_end,
+            start: { ...tz.start },
+            end: { ...tz.end },
+          },
+        };
+      })();
   let at = afterSceneIndex + 1;
   while (at < list.length && list[at].is_transition) at += 1;
   list.splice(at, 0, variant);
   state.placingTransition = null;
   state.movingScene = null;
-  state.editingTransitionVariant = at;
-  state.note = `Variant ${transitionVariantNumber(at)} placed — open the transition to set its zoom rects`;
+  if (isFade) {
+    state.note = `Fade placed · ${transitionFadeSeconds(source)}s crossfade`;
+  } else {
+    state.editingTransitionVariant = at;
+    state.note = `Variant ${transitionVariantNumber(at)} placed — open the transition to set its zoom rects`;
+  }
   changed();
 }
 
@@ -7172,22 +7391,31 @@ function sceneSlot(insertAt, fromIndex) {
 function transitionGap(gap) {
   const placing = state.placingTransition;
   const markers = (gap.transitions || []).filter(isTimelineTransition);
-  if (placing !== null) {
+  const betweenScenes = gap.afterIndex >= 0;
+
+  if (placing !== null && betweenScenes) {
     if (!canPlaceTransitionAfter(gap.afterIndex)) {
       if (!markers.length) {
         return h("div", { class: "transition-gap-spacer", "aria-hidden": true });
       }
     } else {
-      return h("button", {
-        class: "transition-drop",
-        type: "button",
-        title:
-          gap.afterIndex < 0
-            ? "Add opening variant before the first scene"
-            : "Add transition here (visual only — songs stay on the scenes)",
-        "aria-label": "Add transition here",
-        onClick: () => placeTransitionAfter(placing, gap.afterIndex),
-      });
+      const source = resolveTransition(scenes()[placing]);
+      const isFade = isFadeTransition(source);
+      const hasFade = markers.some((index) => isFadeTransition(resolveTransition(scenes()[index])));
+      if (isFade && hasFade) {
+        return h("div", { class: "transition-gap-spacer", "aria-hidden": true });
+      }
+      return h(
+        "div",
+        { class: "transition-gap-bubble" },
+        h("button", {
+          class: "transition-drop transition-bubble-slot",
+          type: "button",
+          title: "Add fade here",
+          "aria-label": "Add fade transition here",
+          onClick: () => placeTransitionAfter(placing, gap.afterIndex),
+        })
+      );
     }
   }
 
@@ -7202,20 +7430,24 @@ function transitionGap(gap) {
       const entry = scenes()[index];
       const cfg = resolveTransition(entry);
       const title = cfg?.title || "Transition";
+      const fade = isFadeTransition(cfg);
       const variant = transitionVariantNumber(index);
+      const fadeSecs = transitionFadeSeconds(cfg);
       return h(
         "div",
         {
           class: "transition-dot-wrap",
-          title: `${title} · variant ${variant} — edit this placement’s zoom in/out`,
+          title: fade
+            ? `Fade · ${fadeSecs}s crossfade — click to edit duration`
+            : `${title} · variant ${variant} — edit this placement’s zoom in/out`,
         },
         h(
           "button",
           {
-            class: "transition-dot",
+            class: `transition-dot${fade ? " is-fade" : ""}`,
             type: "button",
-            "aria-label": `Open ${title} variant ${variant}`,
-            text: String(variant),
+            "aria-label": fade ? `Fade ${fadeSecs} seconds` : `Open ${title} variant ${variant}`,
+            text: fade ? "◐" : String(variant),
             onClick: () => openTransitionVariant(index),
           }
         ),
@@ -7224,10 +7456,8 @@ function transitionGap(gap) {
           {
             class: "transition-dot-x",
             type: "button",
-            title: isTransitionVariant(entry)
-              ? "Remove this variant"
-              : "Remove transition (and all variants)",
-            "aria-label": `Remove ${title} variant ${variant}`,
+            title: fade ? "Remove fade" : isTransitionVariant(entry) ? "Remove this variant" : "Remove transition",
+            "aria-label": fade ? "Remove fade" : `Remove ${title} variant ${variant}`,
             onClick: (event) => {
               event.stopPropagation();
               removeTransitionAt(index);
@@ -7238,6 +7468,122 @@ function transitionGap(gap) {
       );
     })
   );
+}
+
+async function videoPickChoices() {
+  await loadVideos();
+  if (!state.jars?.length) await loadJars();
+  const jarTitles = Object.fromEntries(
+    (state.jars || []).map((jar) => [jar.id, (jar.title || jar.id).trim() || jar.id])
+  );
+  return (state.videos || [])
+    .filter((video) => video.id && video.id !== state.videoId)
+    .map((video) => {
+      const title = (video.title || video.id).trim() || video.id;
+      const jarId = video.jar || "";
+      const jarName = jarId ? jarTitles[jarId] || jarId : "";
+      return {
+        id: video.id,
+        jarId: jarId || null,
+        label: jarName ? `${jarName} · ${title}` : title,
+      };
+    })
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+async function requestMoveSceneToVideo(index) {
+  const list = scenes();
+  const entry = list[index];
+  if (!entry || entry.is_transition) return;
+  if (list.filter((scene) => !scene.is_transition).length <= 1) {
+    state.note = "Keep at least one scene in this video";
+    render();
+    return;
+  }
+
+  const choices = await videoPickChoices();
+  if (!choices.length) {
+    state.note = "No other videos — create another video first";
+    render();
+    return;
+  }
+
+  const name = sceneDisplayName(index);
+  const targetId = await askPick({
+    title: "Move scene to video",
+    message: `Move “${name}” to which video? It will be appended at the end.`,
+    choices,
+    confirmLabel: "Move scene",
+  });
+  if (!targetId) return;
+
+  const targetChoice = choices.find((choice) => choice.id === targetId);
+  const targetLabel = targetChoice?.label || targetId;
+  const targetJar = targetChoice?.jarId || null;
+  const ok = await askConfirm({
+    title: "Move scene?",
+    message: `“${name}” will be removed from this video and added to “${targetLabel}”.`,
+    confirmLabel: "Move scene",
+  });
+  if (!ok) return;
+
+  clearTimeout(saveTimer);
+  state.saving = true;
+  state.movingScene = null;
+  state.placingTransition = null;
+  render();
+
+  try {
+    const response = await fetch("/api/move-scene", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: state.videoId,
+        to: targetId,
+        scene: index,
+      }),
+    });
+    const raw = await response.text();
+    let data = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      data = {};
+    }
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error("Move scene API missing — restart serve.py and try again");
+      }
+      throw new Error(data.error || "Could not move scene");
+    }
+
+    const onMovedScene = state.page === "scene" && state.sceneIndex === index;
+    const stayOnSource = state.videoId === data.from && !onMovedScene;
+    if (stayOnSource) {
+      const nextIndex =
+        state.page === "scene" && state.sceneIndex > index
+          ? state.sceneIndex - 1
+          : state.sceneIndex;
+      await loadVideo(state.videoId, state.jarId);
+      if (state.page === "scene") {
+        go("scene", { videoId: state.videoId, sceneIndex: nextIndex, jarId: state.jarId });
+      } else {
+        render();
+      }
+      return;
+    }
+
+    go("scene", {
+      videoId: data.to,
+      sceneIndex: data.toSceneIndex,
+      jarId: targetJar || state.jarId,
+    });
+  } catch (error) {
+    state.note = error.message || "Could not move scene";
+    render();
+  } finally {
+    state.saving = false;
+  }
 }
 
 async function requestRemoveScene(index) {
@@ -7406,6 +7752,20 @@ function sceneCard(index, item) {
     h(
       "button",
       {
+        class: "move-video",
+        type: "button",
+        title: "Move to another video",
+        "aria-label": "Move to another video",
+        onClick: (event) => {
+          event.stopPropagation();
+          requestMoveSceneToVideo(index);
+        },
+      },
+      moveVideoIcon()
+    ),
+    h(
+      "button",
+      {
         class: "trash",
         type: "button",
         title: "Remove scene",
@@ -7525,11 +7885,12 @@ function sceneTimeline(items) {
 }
 
 function transitionPool() {
-  const { items } = videoTimeline();
-  const transitions = scenes()
-    .map((entry, index) => ({ entry, index, item: items[index] }))
-    .filter((row) => isTransitionTemplate(row.entry));
   const placing = state.placingTransition;
+  const fadeTemplate = scenes().find((scene) => isTransitionTemplate(scene) && isFadeTransition(scene));
+  const fadePlacements = scenes().filter(
+    (scene, index) =>
+      scene.is_transition && isTimelineTransition(index) && isFadeTransition(resolveTransition(scene))
+  ).length;
 
   return h(
     "section",
@@ -7542,32 +7903,60 @@ function transitionPool() {
         class: "meta",
         text:
           placing !== null
-            ? "Click a red slot between scenes"
-            : "Shared map & timing — variants live on the timeline",
+            ? "Click a bubble between scenes"
+            : fadePlacements
+              ? `${fadePlacements} fade${fadePlacements === 1 ? "" : "s"} placed`
+              : "Crossfade between scenes",
       })
     ),
-    h(
-      "div",
-      {
-        class: `scene-strip transition-strip${placing !== null ? " is-placing-transition" : ""}`,
-      },
-      transitions.map(({ index, item }) => transitionCard(index, item)),
-      h(
-        "button",
-        {
-          class: "btn ghost transition-add",
-          type: "button",
-          onClick: () => {
-            state.placingTransition = null;
-            scenes().push(blankTransition());
-            const index = scenes().length - 1;
-            changed();
-            go("scene", { videoId: state.videoId, sceneIndex: index });
+    placing !== null
+      ? h(
+          "div",
+          { class: "transition-add-row is-active" },
+          transitionFxSelect("fade", () => {}, "Type", TRANSITION_FX_PICKER),
+          h(
+            "button",
+            {
+              class: "btn ghost transition-cancel",
+              type: "button",
+              text: "Done",
+              onClick: () => {
+                state.placingTransition = null;
+                render();
+              },
+            }
+          )
+        )
+      : h(
+          "button",
+          {
+            class: "btn ghost transition-add",
+            type: "button",
+            onClick: () => startPlacingTransition("fade"),
           },
-        },
-        "+  New transition"
+          "+  New transition"
+        ),
+    fadeTemplate &&
+      h(
+        "div",
+        { class: "transition-fade-meta" },
+        h("span", {
+          class: "meta",
+          text: `Fade · ${transitionFadeSeconds(fadeTemplate)}s`,
+        }),
+        h(
+          "button",
+          {
+            class: "btn ghost transition-edit-fade",
+            type: "button",
+            text: "Edit duration",
+            onClick: () => {
+              const index = scenes().indexOf(fadeTemplate);
+              if (index >= 0) go("scene", { videoId: state.videoId, sceneIndex: index });
+            },
+          }
+        )
       )
-    )
   );
 }
 
@@ -7967,7 +8356,10 @@ function pictureStage(known, image) {
             onPointerdown: beginShortRectDrag,
           },
           h("span", { class: "short-rect-label", text: "9:16" }),
-          h("span", { class: "short-brand", text: "Wonderjar" })
+          h("span", {
+            class: `short-brand is-${shortBrandSide()}`,
+            text: "Wonderjar",
+          })
         ),
       isTransitionScene() &&
         transitionStyleOf(scene()) === "fade_zoom" &&
@@ -8106,9 +8498,9 @@ function bindChromaCanvas(video, canvas, path) {
   canvas.dataset.bound = "1";
   muteVideo(video);
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  // Leaves sit on near-pure #00FF00 — only punch out that screen green.
-  // (Snow uses a darker key; leave its tuning alone for now.)
-  const snow = path.toLowerCase().includes("snow");
+  const lower = path.toLowerCase();
+  const realistic = lower.includes("realistic") || lower.includes("heavy");
+  const snow = lower.includes("snow") && !realistic;
 
   const tick = () => {
     if (!canvas.isConnected) return;
@@ -8131,11 +8523,24 @@ function bindChromaCanvas(video, canvas, path) {
         ctx.drawImage(video, dx, dy, dw, dh);
         const image = ctx.getImageData(0, 0, w, h);
         const data = image.data;
+        const opacity = (effectEntry(path)?.opacity ?? 100) / 100;
         for (let i = 0; i < data.length; i += 4) {
           const r = data[i];
           const g = data[i + 1];
           const b = data[i + 2];
-          if (snow) {
+          if (realistic) {
+            // White flakes arrive green-tinted from compression — use luma, not chroma.
+            const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+            const alpha = Math.min(255, Math.max(0, (lum - 102) * 10));
+            if (alpha <= 0) {
+              data[i + 3] = 0;
+            } else {
+              data[i] = 255;
+              data[i + 1] = 255;
+              data[i + 2] = 255;
+              data[i + 3] = alpha;
+            }
+          } else if (snow) {
             const greenness = g - Math.max(r, b);
             if (g >= 90 && greenness >= 25) data[i + 3] = 0;
           } else {
@@ -8149,6 +8554,9 @@ function bindChromaCanvas(video, canvas, path) {
               data[i + 3] = Math.round(data[i + 3] * (1 - t));
               data[i + 1] = Math.min(g, Math.max(r, b) + 12);
             }
+          }
+          if (opacity < 1 && data[i + 3] > 0) {
+            data[i + 3] = Math.round(data[i + 3] * opacity);
           }
         }
         ctx.putImageData(image, 0, 0);
@@ -8219,6 +8627,17 @@ function sceneView() {
               if (crumb) crumb.textContent = event.target.value || `Scene ${state.sceneIndex + 1}`;
             },
           }),
+          !transition &&
+            h(
+              "button",
+              {
+                class: "btn ghost scene-move-video",
+                type: "button",
+                title: "Move this scene to another video",
+                onClick: () => requestMoveSceneToVideo(state.sceneIndex),
+                text: "Move to…",
+              }
+            ),
           h(
             "label",
             {
@@ -8276,7 +8695,49 @@ function sceneView() {
         bar,
         renderStatus(),
         transition
-          ? h(
+          ? (() => {
+              const fadeOnly = isFadeTransition(current);
+              if (fadeOnly) {
+                if (!current.id) current.id = newTransitionId();
+                const rows = transitionPlacementRows(current);
+                const fadeSecs = transitionFadeSeconds(current);
+                return h(
+                  "div",
+                  { class: "transition-panel transition-panel-fade" },
+                  h(
+                    "div",
+                    { class: "sequence-head" },
+                    h("span", { text: "Fade" }),
+                    h("span", { class: "meta", text: `${fadeSecs}s crossfade` })
+                  ),
+                  h("p", {
+                    class: "meta transition-note",
+                    text: "Place fades from the video page — pick Fade in the sidebar, then click a bubble between scenes.",
+                  }),
+                  transitionDurationFields(current),
+                  rows.length > 0 &&
+                    h(
+                      "div",
+                      { class: "transition-variants" },
+                      h("div", { class: "sequence-head transition-variants-head" }, h("span", { text: "Placed" })),
+                      h(
+                        "ul",
+                        { class: "transition-bridge-list" },
+                        ...rows.map((row) => {
+                          const from = row.prev?.title || "Start";
+                          const to = row.next?.title || "End";
+                          return h(
+                            "li",
+                            {},
+                            h("span", { class: "transition-variant-label", text: `${from} → ${to}` }),
+                            h("span", { class: "len", text: `${fadeSecs}s` })
+                          );
+                        })
+                      )
+                    )
+                );
+              }
+              return h(
               "div",
               { class: "transition-panel" },
               h(
@@ -8346,7 +8807,7 @@ function sceneView() {
                           class: "meta transition-note",
                           text: zoomStyle
                             ? "Shared map + timing. Each variant has its own Start/End zoom rects."
-                            : "Shared map + timing. Fade style — no zoom rects.",
+                            : "Map-only overlay — no zoom rects. For crossfades between scenes, use Between scenes.",
                         }),
                         h(
                           "div",
@@ -8424,7 +8885,8 @@ function sceneView() {
                   ),
                 ];
               })()
-            )
+            );
+            })()
           : [
               h(
                 "div",
@@ -8496,13 +8958,14 @@ function sceneToolbar() {
             const entry = effectEntry(effect.path);
             const on = !!entry;
             const speed = entry?.speed ?? 100;
+            const opacity = entry?.opacity ?? 100;
             const renaming = state.renamingPath === effect.path;
             const toggleEffect = () => {
               if (renaming) return;
               const list = sceneEffects();
               const at = list.findIndex((item) => normalizeEffect(item).file === effect.path);
               if (at >= 0) list.splice(at, 1);
-              else list.push({ file: effect.path, speed: 100 });
+              else list.push({ file: effect.path, speed: 100, opacity: 100 });
               changed();
             };
             return h(
@@ -8530,33 +8993,62 @@ function sceneToolbar() {
               on &&
                 h(
                   "div",
-                  { class: "effect-speed" },
-                  h("span", { class: "effect-speed-label", text: "Speed" }),
-                  h("input", {
-                    class: "effect-speed-range",
-                    type: "range",
-                    min: "25",
-                    max: "200",
-                    step: "5",
-                    value: String(speed),
-                    onInput: (event) => {
-                      const next = Number(event.target.value);
-                      const current = effectEntry(effect.path);
-                      if (current) current.speed = next;
-                      const label = event.target.parentElement?.querySelector(".effect-speed-value");
-                      if (label) label.textContent = `${next}%`;
-                      document
-                        .querySelectorAll(`video[data-effect="${CSS.escape(effect.path)}"]`)
-                        .forEach((video) => {
-                          video.playbackRate = Math.min(4, Math.max(0.1, next / 100));
-                        });
-                    },
-                    onChange: () => {
-                      clearTimeout(saveTimer);
-                      saveTimer = setTimeout(save, 400);
-                    },
-                  }),
-                  h("span", { class: "effect-speed-value", text: `${speed}%` })
+                  { class: "effect-controls" },
+                  h(
+                    "div",
+                    { class: "effect-speed" },
+                    h("span", { class: "effect-speed-label", text: "Speed" }),
+                    h("input", {
+                      class: "effect-speed-range",
+                      type: "range",
+                      min: "25",
+                      max: "200",
+                      step: "5",
+                      value: String(speed),
+                      onInput: (event) => {
+                        const next = Number(event.target.value);
+                        const current = effectEntry(effect.path);
+                        if (current) current.speed = next;
+                        const label = event.target.parentElement?.querySelector(".effect-speed-value");
+                        if (label) label.textContent = `${next}%`;
+                        document
+                          .querySelectorAll(`video[data-effect="${CSS.escape(effect.path)}"]`)
+                          .forEach((video) => {
+                            video.playbackRate = Math.min(4, Math.max(0.1, next / 100));
+                          });
+                      },
+                      onChange: () => {
+                        clearTimeout(saveTimer);
+                        saveTimer = setTimeout(save, 400);
+                      },
+                    }),
+                    h("span", { class: "effect-speed-value", text: `${speed}%` })
+                  ),
+                  h(
+                    "div",
+                    { class: "effect-speed" },
+                    h("span", { class: "effect-speed-label", text: "Opacity" }),
+                    h("input", {
+                      class: "effect-speed-range",
+                      type: "range",
+                      min: "0",
+                      max: "100",
+                      step: "1",
+                      value: String(opacity),
+                      onInput: (event) => {
+                        const next = Number(event.target.value);
+                        const current = effectEntry(effect.path);
+                        if (current) current.opacity = next;
+                        const label = event.target.parentElement?.querySelector(".effect-speed-value");
+                        if (label) label.textContent = `${next}%`;
+                      },
+                      onChange: () => {
+                        clearTimeout(saveTimer);
+                        saveTimer = setTimeout(save, 400);
+                      },
+                    }),
+                    h("span", { class: "effect-speed-value", text: `${opacity}%` })
+                  )
                 )
             );
           })
@@ -9128,7 +9620,7 @@ function selectUploadedForScene(kind, path) {
     return true;
   }
   if (kind === "effects") {
-    if (!effectEntry(path)) sceneEffects().push({ file: path, speed: 100 });
+    if (!effectEntry(path)) sceneEffects().push({ file: path, speed: 100, opacity: 100 });
     changed();
     return true;
   }
@@ -9389,6 +9881,11 @@ function animLayer(entry, index) {
   // Opacity lives on wrappers so soft-edge masks don't kill the dissolve.
   const frontWrap = h("div", { class: "anim-video-wrap is-front" }, primary);
   const backWrap = h("div", { class: "anim-video-wrap is-back" }, secondary);
+  const flipTransform = animFlipTransform(normalized);
+  if (flipTransform) {
+    frontWrap.style.transform = flipTransform;
+    backWrap.style.transform = flipTransform;
+  }
   muteVideo(primary);
   muteVideo(secondary);
   primary.playbackRate = rate;
@@ -9668,7 +10165,13 @@ function stillSlotDial(entry, index) {
             patchStillGen({ jarToClaude: event.target.value }, { redraw: false });
           },
         },
-        { model: state.models?.anthropic || "" }
+        {
+          model: state.models?.anthropic || "",
+          collapsed: forThis ? !!gen.jarCollapsed : true,
+          onToggleCollapse: () => {
+            patchStillGen({ jarCollapsed: !gen.jarCollapsed });
+          },
+        }
       ),
       ...stillGenPromptField(
         "Claude → ChatGPT",
@@ -9684,7 +10187,13 @@ function stillSlotDial(entry, index) {
             patchStillGen({ editPrompt: event.target.value, error: "" }, { redraw: false });
           },
         },
-        { model: state.models?.openaiImage || "" }
+        {
+          model: state.models?.openaiImage || "",
+          collapsed: forThis ? !!gen.claudeCollapsed : false,
+          onToggleCollapse: () => {
+            patchStillGen({ claudeCollapsed: !gen.claudeCollapsed });
+          },
+        }
       ),
       h(
         "label",
@@ -9880,7 +10389,13 @@ function animSlotDial(entry, index) {
             patchAnimGen({ jarToClaude: event.target.value }, { redraw: false });
           },
         },
-        { model: state.models?.anthropic || "" }
+        {
+          model: state.models?.anthropic || "",
+          collapsed: forThis ? !!gen.jarCollapsed : true,
+          onToggleCollapse: () => {
+            patchAnimGen({ jarCollapsed: !gen.jarCollapsed });
+          },
+        }
       ),
       ...stillGenPromptField(
         "Claude → Veo",
@@ -9896,7 +10411,13 @@ function animSlotDial(entry, index) {
             patchAnimGen({ veoPrompt: event.target.value, error: "" }, { redraw: false });
           },
         },
-        { trailing: veoModelSelect({ disabled: busy }) }
+        {
+          trailing: veoModelSelect({ disabled: busy }),
+          collapsed: forThis ? !!gen.veoCollapsed : false,
+          onToggleCollapse: () => {
+            patchAnimGen({ veoCollapsed: !gen.veoCollapsed });
+          },
+        }
       ),
       h(
         "label",
@@ -10135,6 +10656,51 @@ function filledAnimSlotDial(entry, index, { chrome = true } = {}) {
       h("span", {
         class: "anim-dial-value",
         text: entry.aspect === "native" ? "native" : entry.aspect === "landscape" ? "16:9" : "9:16",
+      })
+    ),
+    h(
+      "div",
+      { class: "anim-aspect" },
+      h("span", { class: "anim-dial-label", text: "Direction" }),
+      h(
+        "div",
+        { class: "anim-aspect-choices" },
+        h(
+          "button",
+          {
+            class: `anim-flip-btn${entry.flip === "left" ? " on" : ""}`,
+            type: "button",
+            title: "Face left (mirrored)",
+            "aria-label": "Face left",
+            onClick: () => {
+              if (entry.flip === "left") return;
+              entry.flip = "left";
+              syncAnimFlip(index, entry);
+              changed();
+            },
+          },
+          "←"
+        ),
+        h(
+          "button",
+          {
+            class: `anim-flip-btn${entry.flip !== "left" ? " on" : ""}`,
+            type: "button",
+            title: "Face right (default)",
+            "aria-label": "Face right",
+            onClick: () => {
+              if (entry.flip !== "left") return;
+              entry.flip = "right";
+              syncAnimFlip(index, entry);
+              changed();
+            },
+          },
+          "→"
+        )
+      ),
+      h("span", {
+        class: "anim-dial-value",
+        text: entry.flip === "left" ? "left" : "right",
       })
     ),
     chrome &&
